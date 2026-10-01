@@ -214,7 +214,7 @@ fn filter_args(framework: &Framework, name: &str) -> anyhow::Result<Vec<String>>
 }
 
 /// `Ns.Class.Method(a: 1)` → `Ns.Class.Method`.
-fn method_name(name: &str) -> &str {
+pub(crate) fn method_name(name: &str) -> &str {
     name.split_once('(').map_or(name, |(m, _)| m).trim_end()
 }
 

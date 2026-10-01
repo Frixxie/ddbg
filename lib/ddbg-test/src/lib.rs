@@ -63,6 +63,18 @@ pub struct TestCase {
     pub suite: Option<String>,
 }
 
+impl TestCase {
+    /// Name of the function implementing the test, usable as a debugger
+    /// function breakpoint. Data-driven .NET tests carry their arguments
+    /// in the name (`Ns.Class.Method(a: 1)`), which debuggers cannot bind.
+    pub fn function_name(&self) -> &str {
+        match self.id.provider {
+            ProviderId::DotNet => dotnet::method_name(&self.name),
+            _ => &self.name,
+        }
+    }
+}
+
 /// Filter for discovery. An empty filter matches everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestQuery {

@@ -82,7 +82,7 @@ impl Tests {
 fn start_location(test: &TestCase) -> Location {
     match (&test.source, test.line) {
         (Some(file), Some(line)) => Location::Source(SourceLocation::new(file, line)),
-        _ => Location::Function(FunctionLocation::new(test.name.as_str(), None)),
+        _ => Location::Function(FunctionLocation::new(test.function_name(), None)),
     }
 }
 
@@ -197,6 +197,22 @@ mod tests {
         assert_eq!(pick_name(&l[2..], "le").unwrap().name, "b::lex");
         assert!(pick_name(&l[..2], "pars").is_err());
         assert!(pick_name(&[], "x").is_err());
+    }
+
+    #[test]
+    fn dotnet_theory_starts_at_method() {
+        let name = "Ns.C.AddsMany(a: 1, b: 1, expected: 2)";
+        let mut t = case(name);
+        t.id.provider = ProviderId::DotNet;
+        t.id.data = ProviderData::DotNet {
+            assembly: "/a.dll".into(),
+            project: "/p.csproj".into(),
+            framework: ddbg_test::dotnet::Framework::XUnitV3,
+        };
+        let Location::Function(f) = start_location(&t) else {
+            panic!("expected a function location");
+        };
+        assert_eq!(f, FunctionLocation::new("Ns.C.AddsMany", None));
     }
 
     #[test]
