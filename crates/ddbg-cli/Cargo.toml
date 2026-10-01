@@ -3,6 +3,10 @@ name = "ddbg-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "ddbg"
+path = "src/main.rs"
+
 [dependencies]
 ddbg-dap.workspace = true
 ddbg-core.workspace = true

@@ -221,15 +221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ddbg"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ddbg-cli",
- "tokio",
-]
-
-[[package]]
 name = "ddbg-cli"
 version = "0.1.0"
 dependencies = [

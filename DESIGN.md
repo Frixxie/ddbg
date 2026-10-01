@@ -292,14 +292,15 @@ ddbg/
 │   │   └── dotnet/
 │   │
 │   └── ddbg-cli/
+│       ├── main.rs      # `ddbg` binary
 │       ├── repl.rs
 │       ├── parser.rs
 │       ├── commands.rs
 │       └── render.rs
-│
-└── src/
-    └── main.rs
 ```
+
+The root `Cargo.toml` is a virtual workspace manifest; the `ddbg`
+binary is built from `ddbg-cli`.
 
 A TUI can later become:
 
@@ -1163,22 +1164,21 @@ This makes state transitions deterministic and greatly simplifies future TUI int
 
 # 23. Error model
 
-Errors should be grouped by domain.
+Error messages should identify their domain.
 
 ```rust
-pub enum Error {
-    Adapter(AdapterError),
-    Dap(DapError),
-    Project(ProjectError),
-    Test(TestError),
-    Command(CommandError),
-    Io(std::io::Error),
-}
+// Messages are grouped by domain, e.g.
+// "lldb-dap was not found in PATH"            (adapter)
+// "threads failed: ..."                       (dap)
+// "the program is not being run"              (command)
 ```
 
-Libraries should use `thiserror`.
+All crates use `anyhow` for errors. Errors are reported to the user, not
+matched on, so typed error enums add little value at this stage.
 
-The executable may use `anyhow` only at the outer application boundary if desired.
+Where code later needs to react to a specific failure, introduce a small
+marker type and check it with `anyhow::Error::downcast_ref` rather than
+reintroducing per-domain error enums.
 
 Errors shown in the REPL should be concise:
 
@@ -1346,7 +1346,7 @@ Initial likely dependencies:
 tokio
 serde
 serde_json
-thiserror
+anyhow
 tracing
 tracing-subscriber
 
