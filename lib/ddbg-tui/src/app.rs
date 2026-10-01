@@ -9,6 +9,7 @@ use ddbg_cli::render::{Renderer, help};
 use ddbg_cli::testing::render_list;
 use ddbg_core::breakpoint::{Breakpoint, FunctionLocation, Location, SourceLocation, path_matches};
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
+use ddbg_core::event::ExceptionInfo;
 use ddbg_core::frame::StackFrame;
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -78,6 +79,8 @@ pub struct App {
     /// Highlighted row in the stack pane.
     pub stack_cursor: usize,
     pub locals: Vec<ScopeVariables>,
+    /// Exception the debuggee is stopped on, if any.
+    pub exception: Option<ExceptionInfo>,
     pub breakpoints: Vec<Breakpoint>,
 
     pub log: Vec<String>,
@@ -130,6 +133,7 @@ impl App {
             selected_frame: None,
             stack_cursor: 0,
             locals: Vec::new(),
+            exception: None,
             breakpoints: Vec::new(),
             log: Vec::new(),
             log_scroll: 0,
@@ -175,6 +179,7 @@ impl App {
         self.stack.clear();
         self.selected_frame = None;
         self.locals.clear();
+        self.exception = None;
         self.exec_line = None;
     }
 
@@ -208,6 +213,7 @@ impl App {
             }
             DebugEvent::SessionStopped(info) => {
                 self.status = Status::Stopped;
+                self.exception = info.exception.clone();
                 if let Some(frame) = &info.frame {
                     self.show_frame(frame);
                 }

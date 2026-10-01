@@ -6,6 +6,8 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use ddbg_cli::render::exception_lines;
+
 use crate::app::{App, Focus, Status};
 use crate::picker::{FunctionPicker, Picker, PickerItem, ProgramPicker, TestPicker};
 
@@ -257,6 +259,9 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
     let (text, color) = match app.status {
         Status::Idle => ("not started".to_owned(), Color::DarkGray),
         Status::Running => ("running".to_owned(), Color::Green),
+        Status::Stopped if app.exception.is_some() => {
+            ("stopped on exception".to_owned(), Color::Red)
+        }
         Status::Stopped => ("stopped".to_owned(), Color::Yellow),
         Status::Exited(code) => (format!("exited ({code})"), Color::Blue),
         Status::Terminated => ("terminated".to_owned(), Color::Blue),
@@ -398,6 +403,19 @@ fn draw_stack(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_locals(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
+    if let Some(ex) = &app.exception {
+        let mut text = Vec::new();
+        exception_lines(ex, &mut text);
+        let red = Style::new().fg(Color::Red);
+        lines.extend(
+            text.into_iter()
+                .enumerate()
+                .map(|(i, l)| Line::styled(l, if i == 0 { red.bold() } else { red })),
+        );
+        if !app.locals.is_empty() {
+            lines.push(Line::raw(""));
+        }
+    }
     let multiple = app.locals.len() > 1;
     for scope in &app.locals {
         if multiple {

@@ -69,6 +69,7 @@ pub enum Feature {
     SetVariable,
     StepBack,
     Completions,
+    ExceptionInfo,
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +105,7 @@ impl DebugSession {
             Feature::SetVariable => c.supports_set_variable,
             Feature::StepBack => c.supports_step_back,
             Feature::Completions => c.supports_completions_request,
+            Feature::ExceptionInfo => c.supports_exception_info_request,
         }
     }
 

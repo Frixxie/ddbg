@@ -11,9 +11,9 @@ use std::time::Duration;
 use ddbg_dap::client::channel_closed;
 use ddbg_dap::protocol::{
     self as dap, ConfigurationDoneArguments, ContinueArguments, DapEvent, DisconnectArguments,
-    EvaluateArguments, InitializeArguments, LaunchArguments, NextArguments, PauseArguments,
-    ScopesArguments, StackTraceArguments, StepInArguments, StepOutArguments, ThreadsArguments,
-    VariablesArguments,
+    EvaluateArguments, ExceptionInfoArguments, InitializeArguments, LaunchArguments, NextArguments,
+    PauseArguments, ScopesArguments, StackTraceArguments, StepInArguments, StepOutArguments,
+    ThreadsArguments, VariablesArguments,
 };
 use ddbg_dap::{AdapterProcess, DapClient, Incoming};
 use tokio::process::Child;
@@ -25,7 +25,7 @@ use crate::command::{Command, FrameSelector, Location, Reply, ScopeVariables};
 use anyhow::{Result, anyhow, bail};
 
 use crate::error::{NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING, NOT_STOPPED};
-use crate::event::{DebugEvent, Output, StopInfo};
+use crate::event::{DebugEvent, ExceptionInfo, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
 use crate::target::{DebugTarget, LaunchTarget};
 use crate::thread::{Thread, ThreadId};
@@ -714,14 +714,37 @@ impl Engine {
         if let Some(tid) = tid {
             self.load_stack(tid).await?;
         }
+        let exception = match (&reason, tid) {
+            (StopReason::Exception(_), Some(tid)) => self.exception_info(tid).await,
+            _ => None,
+        };
 
         self.emit(DebugEvent::SessionStopped(StopInfo {
             reason,
             thread: tid,
             description: s.description.or(s.text),
             frame: self.session.stack.first().cloned(),
+            exception,
         }));
         Ok(())
+    }
+
+    /// Best effort: a failing `exceptionInfo` must not hide the stop.
+    async fn exception_info(&self, tid: ThreadId) -> Option<ExceptionInfo> {
+        if !self.session.supports(Feature::ExceptionInfo) {
+            return None;
+        }
+        let client = self.client().ok()?;
+        match client
+            .request(ExceptionInfoArguments { thread_id: tid.0 })
+            .await
+        {
+            Ok(resp) => Some(resp.into()),
+            Err(e) => {
+                tracing::debug!("exceptionInfo failed: {e}");
+                None
+            }
+        }
     }
 
     /// Scoped function breakpoints: DAP matches by name only, so a stop in

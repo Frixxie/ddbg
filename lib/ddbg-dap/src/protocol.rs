@@ -409,6 +409,44 @@ pub struct EvaluateResponse {
 }
 request!(EvaluateArguments, "evaluate", EvaluateResponse);
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionInfoArguments {
+    pub thread_id: i64,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionInfoResponse {
+    pub exception_id: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub break_mode: Option<String>,
+    #[serde(default)]
+    pub details: Option<ExceptionDetails>,
+}
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionDetails {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub type_name: Option<String>,
+    #[serde(default)]
+    pub full_type_name: Option<String>,
+    #[serde(default)]
+    pub evaluate_name: Option<String>,
+    #[serde(default)]
+    pub stack_trace: Option<String>,
+    #[serde(default)]
+    pub inner_exception: Vec<ExceptionDetails>,
+}
+request!(
+    ExceptionInfoArguments,
+    "exceptionInfo",
+    ExceptionInfoResponse
+);
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectArguments {

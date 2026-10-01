@@ -73,7 +73,7 @@ impl Fake {
                 "initialize" => {
                     self.respond(
                         &req,
-                        json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true}),
+                        json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true, "supportsExceptionInfoRequest": true}),
                     )
                     .await
                 }
@@ -153,6 +153,32 @@ impl Fake {
                     self.respond(&req, json!({})).await;
                     self.event("stopped", json!({"reason": "step", "threadId": 1}))
                         .await;
+                }
+                "stepIn" => {
+                    self.respond(&req, json!({})).await;
+                    self.event(
+                        "stopped",
+                        json!({"reason": "exception", "threadId": 1, "text": "Unhandled"}),
+                    )
+                    .await;
+                }
+                "exceptionInfo" => {
+                    assert_eq!(args["threadId"], 1);
+                    self.respond(
+                        &req,
+                        json!({
+                            "exceptionId": "System.InvalidOperationException",
+                            "description": "Outer failed",
+                            "breakMode": "unhandled",
+                            "details": {
+                                "message": "Outer failed",
+                                "typeName": "InvalidOperationException",
+                                "fullTypeName": "System.InvalidOperationException",
+                                "innerException": [{"message": "Bad arg", "typeName": "System.ArgumentException"}]
+                            }
+                        }),
+                    )
+                    .await
                 }
                 "continue" => {
                     self.respond(&req, json!({"allThreadsContinued": true}))
@@ -429,4 +455,31 @@ async fn function_breakpoint_out_of_scope_is_skipped() {
     .await;
     assert!(matches!(ev, DebugEvent::SessionTerminated), "got {ev:?}");
     assert_eq!(requests(&log, "continue"), 1);
+}
+
+#[tokio::test]
+async fn exception_stop_fetches_exception_info() {
+    let (e, log, mut rx) = start_stopped_at_breakpoint().await;
+    assert_eq!(requests(&log, "exceptionInfo"), 0);
+    e.execute(Command::Step).await.unwrap();
+    let ev = wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await;
+    let DebugEvent::SessionStopped(info) = ev else {
+        unreachable!()
+    };
+    assert_eq!(info.reason, StopReason::Exception(Some("Unhandled".into())));
+    let ex = info.exception.expect("exception info");
+    assert_eq!(ex.id, "System.InvalidOperationException");
+    assert_eq!(
+        ex.type_name.as_deref(),
+        Some("System.InvalidOperationException")
+    );
+    assert_eq!(ex.message.as_deref(), Some("Outer failed"));
+    assert_eq!(ex.break_mode.as_deref(), Some("unhandled"));
+    assert_eq!(ex.inner.len(), 1);
+    assert_eq!(
+        ex.inner[0].type_name.as_deref(),
+        Some("System.ArgumentException")
+    );
+    assert_eq!(ex.inner[0].message.as_deref(), Some("Bad arg"));
+    assert_eq!(requests(&log, "exceptionInfo"), 1);
 }

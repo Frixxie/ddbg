@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use ddbg_core::DebugEvent;
 use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation};
 use ddbg_core::command::{Command, Reply};
-use ddbg_core::event::{OutputCategory, StopInfo};
+use ddbg_core::event::{ExceptionInfo, OutputCategory, StopInfo};
 use ddbg_core::frame::StackFrame;
 use ddbg_core::session::StopReason;
 use ddbg_core::variable::Variable;
@@ -169,10 +169,11 @@ impl Renderer {
                         frame.name,
                         self.frame_location(frame)
                     ));
-                    if let (StopReason::Exception(_), Some(desc)) =
-                        (&info.reason, &info.description)
-                    {
-                        lines.push(desc.clone());
+                    if let StopReason::Exception(_) = &info.reason {
+                        match &info.exception {
+                            Some(ex) => exception_lines(ex, &mut lines),
+                            None => lines.extend(info.description.clone()),
+                        }
                     }
                 }
                 let src = frame
@@ -332,6 +333,29 @@ impl Renderer {
 
 /// Whether a value's summary is uninformative enough that its children
 /// should be shown (e.g. `Foo @ 0x1234`, `{...}`, `{MyApp.Foo}`).
+/// `Type: message`, then inner exceptions in .NET `ToString()` style.
+pub fn exception_lines(ex: &ExceptionInfo, lines: &mut Vec<String>) {
+    fn summary(ex: &ExceptionInfo) -> String {
+        let ty = ex.type_name.as_deref().unwrap_or(&ex.id);
+        match ex.message.as_deref().or(ex.description.as_deref()) {
+            Some(m) if !ty.is_empty() => format!("{ty}: {m}"),
+            Some(m) => m.to_owned(),
+            None => ty.to_owned(),
+        }
+    }
+    fn inner(ex: &ExceptionInfo, depth: usize, lines: &mut Vec<String>) {
+        for i in &ex.inner {
+            lines.push(format!("{} ---> {}", " ".repeat(depth), summary(i)));
+            inner(i, depth + 1, lines);
+        }
+    }
+    let s = summary(ex);
+    if !s.is_empty() {
+        lines.push(s);
+    }
+    inner(ex, 0, lines);
+}
+
 fn needs_expansion(value: &str, type_name: Option<&str>) -> bool {
     let v = value.trim();
     v.is_empty()
@@ -400,6 +424,7 @@ mod tests {
                 thread: None,
                 description: None,
                 frame: Some(frame(&file, 2, "app::main")),
+                exception: None,
             }))
             .unwrap();
         assert_eq!(
@@ -414,9 +439,46 @@ mod tests {
                 thread: None,
                 description: None,
                 frame: Some(frame(&file, 3, "app::main")),
+                exception: None,
             }))
             .unwrap();
         assert_eq!(out, "1   fn main() {\n2       let x = 1;\n3 > }");
+    }
+
+    #[test]
+    fn exception_stop_shows_type_message_and_inner() {
+        let mut r = Renderer::new(PathBuf::from("/src"));
+        let ex = |ty: &str, msg: &str, inner: Vec<ExceptionInfo>| ExceptionInfo {
+            id: ty.into(),
+            type_name: Some(ty.into()),
+            message: Some(msg.into()),
+            inner,
+            ..Default::default()
+        };
+        let out = r
+            .event(&DebugEvent::SessionStopped(StopInfo {
+                reason: StopReason::Exception(Some("Unhandled".into())),
+                thread: None,
+                description: Some("Outer failed".into()),
+                frame: Some(frame(Path::new("/src/missing.cs"), 7, "App.Main")),
+                exception: Some(ex(
+                    "System.InvalidOperationException",
+                    "Outer failed",
+                    vec![ex(
+                        "System.ArgumentException",
+                        "Bad arg",
+                        vec![ex("System.FormatException", "Bad format", vec![])],
+                    )],
+                )),
+            }))
+            .unwrap();
+        assert_eq!(
+            out,
+            "Exception: Unhandled, App.Main at missing.cs:7\n\
+             System.InvalidOperationException: Outer failed\n\
+             \x20---> System.ArgumentException: Bad arg\n\
+             \x20 ---> System.FormatException: Bad format"
+        );
     }
 
     #[test]
