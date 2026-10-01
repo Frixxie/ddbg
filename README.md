@@ -83,9 +83,10 @@ Process exited normally.
 |---|---|
 | `-- <program> [args...]` | Program to debug and its arguments |
 | `--run` | Launch immediately instead of waiting for `run` |
-| `--tui` | Full-screen terminal UI (experimental; `?` lists keys, `:` takes REPL commands) |
+| `--tui` | Full-screen terminal UI (experimental, see [Terminal UI](#terminal-ui)) |
 | `--stop-on-entry` | Launch and stop at the program entry point |
-| `--adapter "<cmd> [args]"` | Debug adapter command (default `lldb-dap`), e.g. `--adapter "netcoredbg --interpreter=vscode"` |
+| `--no-detect` | Disable project and program auto-detection |
+| `--adapter "<cmd> [args]"` | Debug adapter command (default chosen from the detected project), e.g. `--adapter "netcoredbg --interpreter=vscode"` |
 | `-v`, `--verbose` | Show debug adapter console messages |
 | `--log-dap <file>` | Log DAP traffic to a file |
 
@@ -138,6 +139,66 @@ ddbg> test-debug 2
 Running a single row of a `[Theory]` runs all of that method's rows. Other
 MTP frameworks are listed but cannot be run or debugged individually yet.
 
+## Terminal UI
+
+`ddbg --tui` opens a full-screen interface. It uses the same engine as the
+REPL and accepts all the options above:
+
+```console
+ddbg --tui
+ddbg --tui --stop-on-entry -- target/debug/my-app --some-arg
+```
+
+The screen is divided into these areas:
+
+- **Title bar:** program state (`not started`, `running`, `stopped`, `exited`,
+  `terminated`), the current program, and `working...` while a command runs.
+- **Source pane:** shows breakpoints in the gutter (`●` verified, `○`
+  unverified) and marks the execution line with `▶`.
+- **stack**, **locals**, and **breakpoints** panes on the right.
+- **Output pane:** the event and command log.
+- **Bottom line:** key hints, or the `:` command line when it is open.
+
+Press `?` to list the keys. Press `:` to enter any REPL command, such as
+`:break src/main.rs:14` or `:print point`. Up/Down browse command history,
+which is not saved between sessions.
+
+| Key | Action |
+|---|---|
+| `r` | Run / restart (opens the program picker if none is chosen) |
+| `e` | Pick a program |
+| `t` | Pick a test |
+| `F` | Pick a function |
+| `c`, F5 | Continue |
+| `p`, Ctrl-C | Pause |
+| `K` | Kill |
+| `n`, F10 | Step over |
+| `s`, F11 | Step into |
+| `f`, Shift-F11 | Step out |
+| `b`, F9 | Toggle breakpoint at the cursor line |
+| `u` / `d` | Frame up / down |
+| Enter | Select the highlighted frame (stack pane) |
+| `.` | Jump to the execution point |
+| Tab | Cycle focus: source, stack, output |
+| `j`/`k`, Up/Down, PageUp/PageDown, `g`/`G` | Move / scroll |
+| `:` | Command line |
+| `?` | Help |
+| `q` | Quit |
+
+### Pickers
+
+Type to filter the list. Each space-separated word must match, and case is
+ignored. Use Up/Down or Ctrl-P/Ctrl-N to move and Esc to close.
+
+| Picker | Enter | Other keys |
+|---|---|---|
+| Tests (`t`) | Debug the test | Ctrl-R run, Ctrl-B debug with a breakpoint at the test start |
+| Programs (`e`) | Run it and make it current | Ctrl-B run and stop on entry |
+| Functions (`F`) | Toggle a function breakpoint (the picker stays open) | Ctrl-O open the declaration in the source pane |
+
+The function picker scans source files in the project (Rust, C#, Python,
+C/C++) and skips build and virtualenv directories.
+
 ## Development
 
 ```console
@@ -161,5 +222,6 @@ cargo test -p ddbg-core -- --ignored
 | `lib/ddbg-dap` | DAP framing, protocol types, client, adapter process |
 | `lib/ddbg-core` | Debug engine, session state, adapter integrations |
 | `lib/ddbg-cli` | REPL frontend (library) |
+| `lib/ddbg-tui` | Full-screen terminal UI (ratatui) |
 | `bin/ddbg` | The `ddbg` binary |
 | `lib/ddbg-project` | Project detection (Cargo, .NET, Python, C/C++) |
