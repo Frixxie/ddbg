@@ -24,7 +24,7 @@ cargo build --release
 The binary is `target/release/ddbg`. To install it on your `PATH`:
 
 ```console
-cargo install --path crates/ddbg
+cargo install --path bin/ddbg
 ```
 
 ## Usage
@@ -123,8 +123,8 @@ cargo test -p ddbg-core -- --ignored
 
 | Crate | Purpose |
 |---|---|
-| `crates/ddbg-dap` | DAP framing, protocol types, client, adapter process |
-| `crates/ddbg-core` | Debug engine, session state, adapter integrations |
-| `crates/ddbg-cli` | REPL frontend (library) |
-| `crates/ddbg` | The `ddbg` binary |
-| `crates/ddbg-project` | Project detection (stub) |
+| `lib/ddbg-dap` | DAP framing, protocol types, client, adapter process |
+| `lib/ddbg-core` | Debug engine, session state, adapter integrations |
+| `lib/ddbg-cli` | REPL frontend (library) |
+| `bin/ddbg` | The `ddbg` binary |
+| `lib/ddbg-project` | Project detection (stub) |

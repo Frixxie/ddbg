@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["lib/*", "bin/*"]
 exclude = ["fixtures"]
 resolver = "3"
 
@@ -9,10 +9,10 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-ddbg-dap = { path = "crates/ddbg-dap" }
-ddbg-core = { path = "crates/ddbg-core" }
-ddbg-cli = { path = "crates/ddbg-cli" }
-ddbg-project = { path = "crates/ddbg-project" }
+ddbg-dap = { path = "lib/ddbg-dap" }
+ddbg-core = { path = "lib/ddbg-core" }
+ddbg-cli = { path = "lib/ddbg-cli" }
+ddbg-project = { path = "lib/ddbg-project" }
 
 anyhow = "1"
 bytes = "1"

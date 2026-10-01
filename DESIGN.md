@@ -264,7 +264,7 @@ Suggested Rust workspace:
 ddbg/
 ├── Cargo.toml
 │
-├── crates/
+├── lib/
 │   ├── ddbg-dap/
 │   │   ├── codec.rs
 │   │   ├── client.rs
@@ -291,14 +291,15 @@ ddbg/
 │   │   ├── rust/
 │   │   └── dotnet/
 │   │
-│   ├── ddbg-cli/
-│   │   ├── repl.rs
-│   │   ├── parser.rs
-│   │   ├── commands.rs
-│   │   └── render.rs
-│   │
-│   └── ddbg/
-│       └── main.rs      # `ddbg` binary
+│   └── ddbg-cli/
+│       ├── repl.rs
+│       ├── parser.rs
+│       ├── commands.rs
+│       └── render.rs
+│
+└── bin/
+    └── ddbg/
+        └── main.rs      # `ddbg` binary
 ```
 
 The root `Cargo.toml` is a virtual workspace manifest. All crates except
@@ -307,7 +308,7 @@ The root `Cargo.toml` is a virtual workspace manifest. All crates except
 A TUI can later become:
 
 ```text
-crates/ddbg-tui
+lib/ddbg-tui
 ```
 
 without changing the debugger core.
