@@ -13,6 +13,7 @@ ddbg-dap = { path = "lib/ddbg-dap" }
 ddbg-core = { path = "lib/ddbg-core" }
 ddbg-cli = { path = "lib/ddbg-cli" }
 ddbg-project = { path = "lib/ddbg-project" }
+ddbg-test = { path = "lib/ddbg-test" }
 
 anyhow = "1"
 bytes = "1"

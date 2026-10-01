@@ -3,8 +3,8 @@
 A terminal-first, language-agnostic debugger with first-class test debugging,
 built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
 
-> Status: early. Program debugging through `lldb-dap` works; test discovery
-> (`tests`, `test-run`, `test-debug`) is not implemented yet.
+> Status: early. Program and test debugging work for Rust (`lldb-dap`) and,
+> experimentally, .NET xUnit v3 on Microsoft.Testing.Platform (`netcoredbg`).
 
 ## Requirements
 
@@ -105,6 +105,24 @@ Process exited normally.
 
 An empty line repeats the last `next`/`step`/`finish`/`continue`. Tab
 completes commands and file paths; history is saved between sessions.
+
+### Tests
+
+Inside a Cargo or .NET project, `tests` builds the test executables and lists them;
+`test-run` and `test-debug` take a number from that list or a name:
+
+```console
+ddbg> tests parser
+1  parser::tests::empty_input
+2  parser::tests::invalid_header
+ddbg> break src/parser.rs:42
+ddbg> test-debug 2
+```
+
+.NET support covers xUnit v3 test projects on Microsoft.Testing.Platform
+(`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`).
+Running a single row of a `[Theory]` runs all of that method's rows. Other
+MTP frameworks are listed but cannot be run or debugged individually yet.
 
 ## Development
 

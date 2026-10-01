@@ -1,2 +1,4 @@
 /target
 /fixtures/*/target
+/fixtures/*/**/bin
+/fixtures/*/**/obj

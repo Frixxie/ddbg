@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(long)]
     pub run: bool,
 
+    /// Disable auto-discovery of the project and binary to debug.
+    #[arg(long)]
+    pub no_detect: bool,
+
     #[command(subcommand)]
     pub command: Option<Subcommand>,
 

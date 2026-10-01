@@ -28,7 +28,7 @@ use crate::error::{NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING, N
 use crate::event::{DebugEvent, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
 use crate::target::{DebugTarget, LaunchTarget};
-use crate::thread::ThreadId;
+use crate::thread::{Thread, ThreadId};
 use crate::variable::{Evaluation, VarRef, Variable};
 
 const MAX_CHILDREN: usize = 100;
@@ -694,11 +694,20 @@ impl Engine {
 
         // threads → stackTrace(selected) → top frame → scopes
         self.refresh_threads().await?;
+        // The stopping thread is authoritative: lldb-dap's `threads` reply
+        // can lag behind newly spawned threads (e.g. libtest's test thread).
+        if let Some(t) = s.thread_id.map(ThreadId)
+            && !self.session.threads.iter().any(|th| th.id == t)
+        {
+            self.session.threads.push(Thread {
+                id: t,
+                name: format!("Thread {t}"),
+            });
+        }
         let exists = |t: ThreadId| self.session.threads.iter().any(|th| th.id == t);
         let tid = s
             .thread_id
             .map(ThreadId)
-            .filter(|t| exists(*t))
             .or(self.session.selected_thread.filter(|t| exists(*t)))
             .or(self.session.threads.first().map(|t| t.id));
         self.session.selected_thread = tid;

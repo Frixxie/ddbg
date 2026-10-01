@@ -6,7 +6,7 @@
 //! corrupts the prompt.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +22,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::commands::DdbgCompleter;
 use crate::parser::{Input, parse};
 use crate::render::{Renderer, help};
+use crate::testing::Tests;
 
 const HISTORY_SIZE: usize = 1000;
 
@@ -89,10 +90,12 @@ pub async fn run(
     cwd: PathBuf,
     initial: Vec<Command>,
     verbose: bool,
+    candidates: Vec<PathBuf>,
+    tests: Tests,
 ) -> anyhow::Result<()> {
     let printer = ExternalPrinter::<String>::new(4096);
     let out = printer.sender();
-    let mut renderer = Renderer::new(cwd);
+    let mut renderer = Renderer::new(cwd.clone());
     renderer.show_console = verbose;
     let renderer = Arc::new(Mutex::new(renderer));
 
@@ -151,6 +154,9 @@ pub async fn run(
         renderer,
         out,
         last_repeatable: None,
+        cwd,
+        candidates,
+        tests,
     };
     for cmd in initial {
         repl.execute(cmd).await;
@@ -184,6 +190,10 @@ struct Repl {
     out: std_mpsc::SyncSender<String>,
     /// Command repeated by an empty line (like gdb).
     last_repeatable: Option<Command>,
+    cwd: PathBuf,
+    /// Binaries found by project detection, used to resolve `run <name>`.
+    candidates: Vec<PathBuf>,
+    tests: Tests,
 }
 
 impl Repl {
@@ -217,7 +227,46 @@ impl Repl {
         }
     }
 
-    async fn execute(&mut self, cmd: Command) -> bool {
+    async fn execute(&mut self, mut cmd: Command) -> bool {
+        // Test targets are complete; only user-typed programs need resolving.
+        let from_test = matches!(cmd, Command::TestDebug(_));
+        // Test commands are handled by the frontend; only the resulting
+        // debug target reaches the engine.
+        let result = match &cmd {
+            Command::Tests(q) => {
+                self.print("discovering tests...".into());
+                Some(self.tests.list(q).await)
+            }
+            Command::TestRun(sel) => {
+                self.print("building tests...".into());
+                Some(self.tests.run(sel).await)
+            }
+            Command::TestDebug(sel) => {
+                self.print("building tests...".into());
+                match self.tests.debug_target(sel).await {
+                    Ok(t) => cmd = Command::Run(Some(t)),
+                    Err(e) => self.print(format!("error: {e}")),
+                }
+                if !matches!(cmd, Command::Run(_)) {
+                    return false;
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(result) = result {
+            match result {
+                Ok(text) => self.print(text),
+                Err(e) => self.print(format!("error: {e:#}")),
+            }
+            return false;
+        }
+        if !from_test && let Command::Run(Some(t)) = &mut cmd {
+            if let Some(p) = resolve_program(&t.program, &self.cwd, &self.candidates) {
+                t.program = p;
+            }
+            crate::apply_dotnet_launch(t);
+        }
         match self.engine.execute(cmd.clone()).await {
             Ok(Reply::Quit) => true,
             Ok(reply) => {
@@ -231,5 +280,46 @@ impl Repl {
                 false
             }
         }
+    }
+}
+
+/// Resolve a bare program name (e.g. `App.dll`, `App` or `my-bin`) against
+/// detected project binaries when it does not exist relative to `cwd`.
+pub(crate) fn resolve_program(
+    program: &Path,
+    cwd: &Path,
+    candidates: &[PathBuf],
+) -> Option<PathBuf> {
+    if program.components().count() != 1 || cwd.join(program).exists() {
+        return None;
+    }
+    candidates
+        .iter()
+        .find(|c| c.file_name() == Some(program.as_os_str()))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|c| c.file_stem() == Some(program.as_os_str()))
+        })
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_bare_names_against_candidates() {
+        let cands = vec![
+            PathBuf::from("/p/A/bin/Debug/net8.0/My.A.dll"),
+            PathBuf::from("/p/target/debug/tool"),
+        ];
+        let cwd = Path::new("/nonexistent-ddbg-cwd");
+        let r = |s: &str| resolve_program(Path::new(s), cwd, &cands);
+        assert_eq!(r("My.A.dll"), Some(cands[0].clone()));
+        assert_eq!(r("My.A"), Some(cands[0].clone()));
+        assert_eq!(r("tool"), Some(cands[1].clone()));
+        assert_eq!(r("other"), None);
+        assert_eq!(r("./tool"), None);
     }
 }

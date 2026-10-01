@@ -14,3 +14,18 @@ fn main() {
     let total = add(point.x, point.y); // line 14
     println!("{greeting}: {total}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+
+    #[test]
+    fn fails() {
+        assert_eq!(add(2, 2), 5);
+    }
+}

@@ -237,6 +237,8 @@ dependencies = [
  "clap",
  "ddbg-core",
  "ddbg-dap",
+ "ddbg-project",
+ "ddbg-test",
  "directories",
  "reedline",
  "serde_json",
@@ -271,6 +273,21 @@ dependencies = [
 [[package]]
 name = "ddbg-project"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "ddbg-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ddbg-core",
+ "ddbg-project",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "derive_more"
