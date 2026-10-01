@@ -291,16 +291,18 @@ ddbg/
 │   │   ├── rust/
 │   │   └── dotnet/
 │   │
-│   └── ddbg-cli/
-│       ├── main.rs      # `ddbg` binary
-│       ├── repl.rs
-│       ├── parser.rs
-│       ├── commands.rs
-│       └── render.rs
+│   ├── ddbg-cli/
+│   │   ├── repl.rs
+│   │   ├── parser.rs
+│   │   ├── commands.rs
+│   │   └── render.rs
+│   │
+│   └── ddbg/
+│       └── main.rs      # `ddbg` binary
 ```
 
-The root `Cargo.toml` is a virtual workspace manifest; the `ddbg`
-binary is built from `ddbg-cli`.
+The root `Cargo.toml` is a virtual workspace manifest. All crates except
+`ddbg` are libraries; `ddbg` is a thin binary that calls `ddbg_cli::run()`.
 
 A TUI can later become:
 

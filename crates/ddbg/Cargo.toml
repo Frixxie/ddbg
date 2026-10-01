@@ -1,0 +1,9 @@
+[package]
+name = "ddbg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ddbg-cli.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
