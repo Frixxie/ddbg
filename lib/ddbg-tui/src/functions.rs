@@ -11,7 +11,16 @@ use std::path::{Path, PathBuf};
 use crate::picker::PickerItem;
 
 /// Directories never worth scanning.
-const SKIP_DIRS: &[&str] = &["target", "bin", "obj", "node_modules"];
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    "bin",
+    "obj",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    "site-packages",
+    "CMakeFiles",
+];
 /// Stop scanning huge trees.
 const MAX_FILES: usize = 5000;
 
@@ -38,6 +47,9 @@ impl PickerItem for Function {
 enum Lang {
     Rust,
     CSharp,
+    Python,
+    /// C and C++.
+    C,
 }
 
 /// Scan source files under `root`, sorted by path then line.
@@ -87,6 +99,8 @@ fn collect_files(dir: &Path, out: &mut Vec<(PathBuf, Lang)>) {
             let lang = match path.extension().and_then(|e| e.to_str()) {
                 Some("rs") => Lang::Rust,
                 Some("cs") => Lang::CSharp,
+                Some("py" | "pyw") => Lang::Python,
+                Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx") => Lang::C,
                 _ => continue,
             };
             out.push((path, lang));
@@ -107,6 +121,9 @@ fn scan(text: &str, lang: Lang) -> Vec<(String, String, u32)> {
             || line.starts_with('[')
             || line.starts_with('{')
             || line.starts_with("where")
+            || line.starts_with('@')
+            || line.starts_with("/*")
+            || line.starts_with('*')
         {
             continue;
         }
@@ -120,20 +137,84 @@ fn scan(text: &str, lang: Lang) -> Vec<(String, String, u32)> {
         let (ty, func) = match lang {
             Lang::Rust => (rust_type(line), rust_fn(line)),
             Lang::CSharp => (cs_type(line), cs_method(line)),
+            Lang::Python => (py_class(line), py_def(line)),
+            // Only top-level definitions; bodies are indented.
+            Lang::C if indent == 0 => (None, c_function(line)),
+            Lang::C => (None, None),
         };
         if let Some(ty) = ty {
             types.push((indent, ty));
         } else if let Some(name) = func {
             let sep = match lang {
-                Lang::Rust => "::",
-                Lang::CSharp => ".",
+                Lang::Rust | Lang::C => "::",
+                Lang::CSharp | Lang::Python => ".",
             };
             let mut qualified: Vec<&str> = types.iter().map(|(_, t)| t.as_str()).collect();
             qualified.push(&name);
-            out.push((name.clone(), qualified.join(sep), i as u32 + 1));
+            // C++ out-of-line members: `Class::method` breaks on `method`.
+            let bare = name.rsplit("::").next().unwrap_or(&name).to_owned();
+            out.push((bare, qualified.join(sep), i as u32 + 1));
         }
     }
     out
+}
+
+fn py_def(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("async ").unwrap_or(line).trim_start();
+    let rest = rest.strip_prefix("def ")?;
+    ident(rest.trim_start()).map(str::to_owned)
+}
+
+fn py_class(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("class ")?;
+    ident(rest.trim_start()).map(str::to_owned)
+}
+
+/// Words that start a top-level line with `(` that is not a definition.
+const C_NOT_DEFS: &[&str] = &[
+    "typedef",
+    "return",
+    "if",
+    "while",
+    "for",
+    "switch",
+    "sizeof",
+    "static_assert",
+    "_Static_assert",
+    "using",
+    "template",
+    "namespace",
+    "class",
+    "struct",
+    "enum",
+    "union",
+];
+
+/// A top-level C/C++ function definition: `type [*]name(...)` not ending in
+/// `;`. Returns `name` (or `Class::name` for out-of-line C++ members).
+fn c_function(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    if line.ends_with(';') || line.ends_with(',') || line.contains('=') {
+        return None;
+    }
+    let open = line.find('(')?;
+    let head = line[..open].trim_end();
+    if C_NOT_DEFS.iter().any(|w| head.starts_with(w)) {
+        return None;
+    }
+    // The name is the last token, after any pointer stars.
+    let split = head.rfind([' ', '*', '&', '\t'])?;
+    let name = &head[split + 1..];
+    let ret = head[..split].trim();
+    if ret.is_empty() || name.is_empty() {
+        return None;
+    }
+    // `a::b::c`, every segment an identifier (destructors keep their `~`).
+    let ok = name.split("::").all(|seg| {
+        ident(seg.trim_start_matches('~'))
+            .is_some_and(|i| i.len() == seg.trim_start_matches('~').len())
+    });
+    ok.then(|| name.to_owned())
 }
 
 fn ident(s: &str) -> Option<&str> {
@@ -384,6 +465,85 @@ public class CalculatorTests
                 ("Calculator.Load".into(), 13),
                 ("Calculator.Calculator".into(), 15),
                 ("CalculatorTests.Adds".into(), 23),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_functions_and_classes() {
+        let src = r#"
+import os
+
+# def commented():
+def add(a, b):
+    return a + b
+
+
+class Point:
+    """A point."""
+
+    def __init__(self, x):
+        self.x = x
+
+    @property
+    def norm(self):
+        def inner():
+            pass
+        return inner()
+
+
+async def fetch():
+    pass
+"#;
+        let got = names(src, Lang::Python);
+        assert_eq!(
+            got,
+            [
+                ("add".into(), 5),
+                ("Point.__init__".into(), 12),
+                ("Point.norm".into(), 16),
+                ("Point.inner".into(), 17),
+                ("fetch".into(), 22),
+            ]
+        );
+    }
+
+    #[test]
+    fn c_functions() {
+        let src = r#"
+#include <stdio.h>
+
+int add(int a, int b);
+static const char *name(void)
+{
+    return "x";
+}
+
+int add(int a, int b) {
+    if (a) { return a; }
+    return a + b;
+}
+
+typedef int (*cb)(int);
+int table[] = { 1, 2 };
+
+void Foo::bar(int x) const
+{
+}
+
+int
+main(void)
+{
+}
+"#;
+        // K&R-style `int\nmain(void)` is not recognized.
+        let got = scan(src, Lang::C);
+        assert_eq!(
+            got,
+            [
+                ("name".into(), "name".into(), 5),
+                ("add".into(), "add".into(), 10),
+                ("bar".into(), "Foo::bar".into(), 18),
             ]
         );
     }

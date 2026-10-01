@@ -2,3 +2,7 @@
 /fixtures/*/target
 /fixtures/*/**/bin
 /fixtures/*/**/obj
+/fixtures/hello-c/hello-c
+/fixtures/hello-c/*.dSYM
+__pycache__/
+/fixtures/*/.venv

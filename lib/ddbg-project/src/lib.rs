@@ -1,12 +1,17 @@
 //! Project detection.
 //!
 //! Walks upward from a directory to find a project root and, when possible,
-//! the binary that should be debugged. Supports Rust (Cargo) and .NET
-//! (`*.csproj` / `*.fsproj` / `*.vbproj`, `*.sln` / `*.slnx`) projects.
+//! the binary that should be debugged. Supports Rust (Cargo), .NET
+//! (`*.csproj` / `*.fsproj` / `*.vbproj`, `*.sln` / `*.slnx`), Python
+//! (`pyproject.toml`, `setup.py`, ...) and C/C++ (CMake, Meson, Make)
+//! projects.
 
+mod c;
 mod dotnet;
+mod python;
 
 pub use dotnet::{DotNetLaunch, dotnet_launch, projects_in as dotnet_projects};
+pub use python::python_interpreter;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,6 +23,9 @@ use serde_json::Value;
 pub enum ProjectKind {
     Rust,
     DotNet,
+    Python,
+    /// C or C++ (built with CMake, Meson or Make).
+    C,
 }
 
 /// A detected project root.
@@ -32,7 +40,8 @@ pub struct Project {
 }
 
 /// Detect the project containing `dir`, if any. The nearest project marker
-/// wins; within one directory, Cargo takes precedence over .NET.
+/// wins; within one directory, Cargo takes precedence over .NET, then Python,
+/// then C (a Makefile often just wraps another toolchain).
 pub fn detect(dir: &Path) -> Option<Project> {
     for d in dir.ancestors() {
         let manifest = d.join("Cargo.toml");
@@ -40,6 +49,12 @@ pub fn detect(dir: &Path) -> Option<Project> {
             return detect_rust(dir, &manifest);
         }
         if let Some(p) = dotnet::detect_in(d) {
+            return Some(p);
+        }
+        if let Some(p) = python::detect_in(d) {
+            return Some(p);
+        }
+        if let Some(p) = c::detect_in(d) {
             return Some(p);
         }
     }

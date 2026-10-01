@@ -5,6 +5,8 @@ built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
 
 > Status: early. Program and test debugging work for Rust (`lldb-dap`) and,
 > experimentally, .NET xUnit v3 on Microsoft.Testing.Platform (`netcoredbg`).
+> Program debugging (no test discovery yet) works for C/C++ (`lldb-dap`) and
+> Python (`debugpy`).
 
 ## Requirements
 
@@ -14,6 +16,15 @@ built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
     Line Tools (`xcode-select --install`) and is found via `xcrun`
     automatically. On Linux install LLVM's `lldb-dap` and put it on `PATH`.
   - **.NET (experimental):** `netcoredbg`, passed with `--adapter`.
+  - **Python:** `debugpy` (`python3 -m pip install debugpy`). ddbg runs
+    `python -m debugpy.adapter` with the project's interpreter: `$VIRTUAL_ENV`,
+    else `.venv`/`venv`/`env` in the project root, else `python3` on `PATH`.
+
+The adapter is picked from the detected project (`Cargo.toml`, `*.csproj`,
+`pyproject.toml`/`setup.py`/`requirements.txt`, `CMakeLists.txt`/`Makefile`/
+`meson.build`) or, for `ddbg -- <program>`, from its extension (`.dll`, `.py`).
+Use `ddbg -- -m package.module` to debug a Python module. `--adapter` overrides
+the choice, e.g. `--adapter ".venv/bin/python -m debugpy.adapter"`.
 
 ## Build
 
@@ -135,7 +146,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-End-to-end tests against a real `lldb-dap` (uses `fixtures/hello-rust`):
+End-to-end tests against real adapters (`fixtures/hello-rust`, `hello-c` via
+`make`, and `hello-python` with `$DDBG_PYTHON`, default `python3`, which must
+have `debugpy`):
 
 ```console
 cargo test -p ddbg-core -- --ignored
@@ -149,4 +162,4 @@ cargo test -p ddbg-core -- --ignored
 | `lib/ddbg-core` | Debug engine, session state, adapter integrations |
 | `lib/ddbg-cli` | REPL frontend (library) |
 | `bin/ddbg` | The `ddbg` binary |
-| `lib/ddbg-project` | Project detection (stub) |
+| `lib/ddbg-project` | Project detection (Cargo, .NET, Python, C/C++) |

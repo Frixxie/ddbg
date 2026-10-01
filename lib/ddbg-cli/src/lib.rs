@@ -13,7 +13,9 @@ pub mod testing;
 use std::sync::Arc;
 
 pub use clap::Parser;
-use ddbg_core::adapter::{DebugAdapter, LldbDapAdapter, NetCoreDbgAdapter, adapter_for_command};
+use ddbg_core::adapter::{
+    DebugAdapter, DebugpyAdapter, LldbDapAdapter, NetCoreDbgAdapter, adapter_for_command,
+};
 use ddbg_core::command::Command;
 use ddbg_core::{EngineConfig, LaunchTarget, engine};
 use ddbg_project::{Project, ProjectKind};
@@ -75,12 +77,6 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         apply_dotnet_launch(t);
     }
 
-    let is_dotnet = match &project {
-        Some(p) => p.kind == ProjectKind::DotNet,
-        None => target
-            .as_ref()
-            .is_some_and(|t| t.program.extension().is_some_and(|e| e == "dll")),
-    };
     let adapter: Arc<dyn DebugAdapter> = match &args.adapter {
         Some(cmd) => {
             let words = parser::split_words(cmd).map_err(anyhow::Error::msg)?;
@@ -89,8 +85,14 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
                 .ok_or_else(|| anyhow::anyhow!("empty --adapter"))?;
             adapter_for_command(program, rest.to_vec()).into()
         }
-        None if is_dotnet => Arc::new(NetCoreDbgAdapter::default()),
-        None => Arc::new(LldbDapAdapter::for_rust()),
+        None => {
+            let kind = project
+                .as_ref()
+                .map(|p| p.kind.clone())
+                .or_else(|| target.as_ref().and_then(kind_of_target));
+            let root = project.as_ref().map_or(cwd.as_path(), |p| &p.root);
+            default_adapter(kind.as_ref(), root)
+        }
     };
 
     let mut initial = Vec::new();
@@ -113,10 +115,15 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
     let tests = match &test_project {
         Some(p) => {
             let provider = match p.kind {
-                ProjectKind::Rust => AnyProvider::Rust(RustTestProvider::new(&p.root)),
-                ProjectKind::DotNet => AnyProvider::DotNet(DotNetTestProvider::new(&p.root)),
+                ProjectKind::Rust => Some(AnyProvider::Rust(RustTestProvider::new(&p.root))),
+                ProjectKind::DotNet => Some(AnyProvider::DotNet(DotNetTestProvider::new(&p.root))),
+                ProjectKind::Python | ProjectKind::C => None,
             };
-            testing::Tests::new(Some(provider), "")
+            let msg = format!(
+                "test discovery is not supported for {:?} projects yet",
+                p.kind
+            );
+            testing::Tests::new(provider, msg)
         }
         None => testing::Tests::new(None, "no project detected; cannot discover tests"),
     };
@@ -151,6 +158,32 @@ pub(crate) fn apply_dotnet_launch(t: &mut LaunchTarget) {
     }
 }
 
+/// Guess the language of a program given on the command line.
+fn kind_of_target(t: &LaunchTarget) -> Option<ProjectKind> {
+    if t.program.as_os_str() == "-m" {
+        return Some(ProjectKind::Python);
+    }
+    match t.program.extension()?.to_str()? {
+        "dll" => Some(ProjectKind::DotNet),
+        "py" | "pyw" => Some(ProjectKind::Python),
+        _ => None,
+    }
+}
+
+/// The adapter to use when `--adapter` is not given. Unknown programs are
+/// assumed to be native and debugged with lldb-dap.
+fn default_adapter(kind: Option<&ProjectKind>, root: &std::path::Path) -> Arc<dyn DebugAdapter> {
+    match kind {
+        Some(ProjectKind::DotNet) => Arc::new(NetCoreDbgAdapter::default()),
+        Some(ProjectKind::Python) => Arc::new(match ddbg_project::python_interpreter(root) {
+            Some(python) => DebugpyAdapter::with_python(python.to_string_lossy()),
+            None => DebugpyAdapter::default(),
+        }),
+        Some(ProjectKind::C) => Arc::new(LldbDapAdapter::default()),
+        Some(ProjectKind::Rust) | None => Arc::new(LldbDapAdapter::for_rust()),
+    }
+}
+
 /// Pick a binary to debug.
 fn discover_target(project: &Project) -> Option<LaunchTarget> {
     tracing::debug!(?project, "detected project");
@@ -179,6 +212,8 @@ fn discover_target(project: &Project) -> Option<LaunchTarget> {
         match project.kind {
             ProjectKind::Rust => " (not built yet; run `cargo build`)",
             ProjectKind::DotNet => " (not built yet; run `dotnet build`)",
+            ProjectKind::C => " (not built yet)",
+            ProjectKind::Python => " (not found)",
         }
     };
     eprintln!(

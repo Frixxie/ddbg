@@ -7,7 +7,8 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "ddbg", version, args_conflicts_with_subcommands = true)]
 pub struct Args {
-    /// Debug adapter command (default: lldb-dap).
+    /// Debug adapter command (default by language: lldb-dap for Rust/C/C++,
+    /// netcoredbg for .NET, `python3 -m debugpy.adapter` for Python).
     #[arg(long, global = true)]
     pub adapter: Option<String>,
 

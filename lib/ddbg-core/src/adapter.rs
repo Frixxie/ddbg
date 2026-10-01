@@ -47,6 +47,12 @@ pub fn adapter_for_command(program: &str, args: Vec<String>) -> Box<dyn DebugAda
             program: program.to_owned(),
             args: if args.is_empty() { default.args } else { args },
         })
+    } else if name.starts_with("python") || name.starts_with("debugpy") {
+        let default = DebugpyAdapter::default();
+        Box::new(DebugpyAdapter {
+            program: program.to_owned(),
+            args: if args.is_empty() { default.args } else { args },
+        })
     } else {
         Box::new(LldbDapAdapter {
             program: program.to_owned(),
@@ -207,6 +213,110 @@ impl DebugAdapter for NetCoreDbgAdapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// debugpy
+// ---------------------------------------------------------------------------
+
+/// Python via debugpy's DAP adapter (`python -m debugpy.adapter`, stdio).
+///
+/// `program` is the Python interpreter. It must have `debugpy` installed and
+/// is also used to run the debuggee.
+#[derive(Debug, Clone)]
+pub struct DebugpyAdapter {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Default for DebugpyAdapter {
+    fn default() -> Self {
+        Self::with_python("python3")
+    }
+}
+
+impl DebugpyAdapter {
+    pub fn with_python(python: impl Into<String>) -> Self {
+        Self {
+            program: python.into(),
+            args: vec!["-m".into(), "debugpy.adapter".into()],
+        }
+    }
+
+    /// The interpreter, when the adapter is started through one (`python -m`).
+    fn python(&self) -> Option<String> {
+        let name = Path::new(&self.program).file_name()?.to_string_lossy();
+        name.starts_with("python")
+            .then(|| find_program(&self.program).map(|p| path_str(&p)))
+            .flatten()
+    }
+}
+
+impl DebugAdapter for DebugpyAdapter {
+    fn id(&self) -> &str {
+        "debugpy"
+    }
+
+    fn command(&self) -> Result<AdapterCommand> {
+        let cmd = resolve(&self.program, &self.args)?;
+        if self.args.first().is_some_and(|a| a == "-m") {
+            let ok = std::process::Command::new(&cmd.program)
+                .args(["-c", "import debugpy"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return Err(anyhow!(
+                    "debugpy is not installed for {} (try `{} -m pip install debugpy`)",
+                    cmd.program,
+                    self.program
+                ));
+            }
+        }
+        Ok(cmd)
+    }
+
+    fn build_launch_request(&self, t: &LaunchTarget) -> Result<Value> {
+        let mut v = json!({
+            "name": "ddbg",
+            "type": "debugpy",
+            "request": "launch",
+            "args": t.args,
+            "cwd": path_str(&t.cwd),
+            "env": t.env,
+            "stopOnEntry": t.stop_on_entry,
+            "console": "internalConsole",
+            "justMyCode": true,
+            "redirectOutput": true,
+        });
+        // `-m pkg.module` runs a module, anything else is a script.
+        match t.program.to_str() {
+            Some("-m") => {
+                let (module, rest) = t
+                    .args
+                    .split_first()
+                    .ok_or_else(|| anyhow!("-m needs a module name"))?;
+                v["module"] = json!(module);
+                v["args"] = json!(rest);
+            }
+            _ => v["program"] = json!(path_str(&t.absolute_program())),
+        }
+        if let Some(python) = self.python() {
+            v["python"] = json!(python);
+        }
+        Ok(v)
+    }
+
+    fn build_attach_request(&self, t: &AttachTarget) -> Result<Value> {
+        Ok(json!({
+            "name": "ddbg",
+            "type": "debugpy",
+            "request": "attach",
+            "processId": t.pid,
+            "justMyCode": true,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +357,32 @@ mod tests {
             "coreclr"
         );
         assert_eq!(adapter_for_command("lldb-dap", vec![]).id(), "lldb-dap");
+        assert_eq!(adapter_for_command("python3", vec![]).id(), "debugpy");
+        assert_eq!(
+            adapter_for_command(".venv/bin/python", vec![]).id(),
+            "debugpy"
+        );
+    }
+
+    #[test]
+    fn debugpy_launch_arguments() {
+        let a = DebugpyAdapter::with_python("definitely-not-python");
+        let mut t = target();
+        t.program = "main.py".into();
+        let v = a.build_launch_request(&t).unwrap();
+        assert_eq!(v["type"], "debugpy");
+        assert_eq!(v["program"], "/proj/main.py");
+        assert_eq!(v["env"], json!({"RUST_LOG": "debug"}));
+        assert_eq!(v["stopOnEntry"], false);
+        assert!(v.get("module").is_none());
+
+        let mut t = target();
+        t.program = "-m".into();
+        t.args = vec!["pkg.app".into(), "--x".into()];
+        let v = a.build_launch_request(&t).unwrap();
+        assert_eq!(v["module"], "pkg.app");
+        assert_eq!(v["args"], json!(["--x"]));
+        assert!(v.get("program").is_none());
     }
 
     #[test]
