@@ -14,6 +14,9 @@ use ddbg_core::variable::Variable;
 
 use crate::parser::COMMANDS;
 
+/// Number of source lines shown before and after the current line.
+const SOURCE_CONTEXT: usize = 2;
+
 pub struct Renderer {
     cwd: PathBuf,
     sources: HashMap<PathBuf, Option<Vec<String>>>,
@@ -44,6 +47,7 @@ impl Renderer {
             .to_string()
     }
 
+    /// Renders the current line with `SOURCE_CONTEXT` lines before and after.
     fn source_line(&mut self, path: &Path, line: u32) -> Option<String> {
         let lines = self
             .sources
@@ -54,8 +58,20 @@ impl Renderer {
                     .map(|s| s.lines().map(str::to_owned).collect())
             })
             .as_ref()?;
-        let text = lines.get(line.checked_sub(1)? as usize)?;
-        Some(format!("{line} > {}", text.trim_end()))
+        let current = line.checked_sub(1)? as usize;
+        lines.get(current)?;
+        let start = current.saturating_sub(SOURCE_CONTEXT);
+        let end = (current + SOURCE_CONTEXT + 1).min(lines.len());
+        let width = end.to_string().len();
+        let out: Vec<String> = (start..end)
+            .map(|i| {
+                let marker = if i == current { '>' } else { ' ' };
+                format!("{:>width$} {marker} {}", i + 1, lines[i].trim_end())
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        Some(out.join("\n"))
     }
 
     fn frame_location(&self, frame: &StackFrame) -> String {
@@ -388,7 +404,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             out,
-            "Breakpoint 1, app::main at main.rs:2\n\n2 >     let x = 1;"
+            "Breakpoint 1, app::main at main.rs:2\n\n1   fn main() {\n2 >     let x = 1;\n3   }"
         );
 
         // stepping within the same function only shows the line
@@ -400,7 +416,7 @@ mod tests {
                 frame: Some(frame(&file, 3, "app::main")),
             }))
             .unwrap();
-        assert_eq!(out, "3 > }");
+        assert_eq!(out, "1   fn main() {\n2       let x = 1;\n3 > }");
     }
 
     #[test]
