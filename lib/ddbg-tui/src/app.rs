@@ -7,13 +7,14 @@ use ddbg_cli::Outcome;
 use ddbg_cli::parser::{Input, parse};
 use ddbg_cli::render::{Renderer, help};
 use ddbg_cli::testing::render_list;
-use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation, path_matches};
+use ddbg_core::breakpoint::{Breakpoint, FunctionLocation, Location, SourceLocation, path_matches};
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::frame::StackFrame;
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::picker::{Program, ProgramPicker, TestPicker};
+use crate::functions::Function;
+use crate::picker::{FunctionPicker, Program, ProgramPicker, TestPicker};
 use crate::{Executor, Msg};
 
 const MAX_LOG_LINES: usize = 5000;
@@ -92,6 +93,8 @@ pub struct App {
     pub picker: Option<TestPicker>,
     /// Open program picker.
     pub programs: Option<ProgramPicker>,
+    /// Open function picker.
+    pub functions: Option<FunctionPicker>,
     /// Binaries found by project detection.
     pub candidates: Vec<PathBuf>,
     /// Program the next `run` launches, if known.
@@ -135,6 +138,7 @@ impl App {
             history_pos: None,
             picker: None,
             programs: None,
+            functions: None,
             candidates,
             program,
         }
@@ -184,6 +188,11 @@ impl App {
                 self.outcome(outcome, silent);
             }
             Msg::Progress(text) => self.log(text),
+            Msg::Functions(fns) => {
+                if let Some(picker) = &mut self.functions {
+                    picker.set_items(fns);
+                }
+            }
             Msg::EventsLagged(n) => self.log(format!("warning: dropped {n} debugger events")),
         }
     }
@@ -373,12 +382,17 @@ impl App {
             self.program_key(key);
             return;
         }
+        if self.functions.is_some() {
+            self.function_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => self.execute(Command::Quit),
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('t') => self.open_picker(),
             KeyCode::Char('e') => self.open_program_picker(),
+            KeyCode::Char('F') => self.open_function_picker(),
             KeyCode::Char(':') => {
                 self.input = Some(String::new());
                 self.history_pos = None;
@@ -475,6 +489,67 @@ impl App {
         target.stop_on_entry = stop_on_entry;
         self.program = Some(path);
         self.execute(Command::Run(Some(target)));
+    }
+
+    fn open_function_picker(&mut self) {
+        self.functions = Some(FunctionPicker::default());
+        // Rescan on every open so the list reflects current sources.
+        self.exec.discover_functions(self.cwd.clone());
+    }
+
+    /// Function breakpoint location for `f`, scoped to its file so that
+    /// same-named functions elsewhere do not stop.
+    fn function_location(&self, f: &Function) -> FunctionLocation {
+        let file = f.path.strip_prefix(&self.cwd).unwrap_or(&f.path);
+        FunctionLocation::new(f.name.clone(), Some(file.to_path_buf()))
+    }
+
+    /// Existing breakpoint on function `f`, if any.
+    pub fn function_breakpoint(&self, f: &Function) -> Option<&Breakpoint> {
+        let loc = Location::Function(self.function_location(f));
+        self.breakpoints.iter().find(|bp| bp.requested == loc)
+    }
+
+    /// Keys while the function picker is open.
+    fn function_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.functions.as_mut() else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.functions = None,
+            KeyCode::Up => picker.move_cursor(-1),
+            KeyCode::Down => picker.move_cursor(1),
+            KeyCode::PageUp => picker.move_cursor(-10),
+            KeyCode::PageDown => picker.move_cursor(10),
+            KeyCode::Char('p') if ctrl => picker.move_cursor(-1),
+            KeyCode::Char('n') if ctrl => picker.move_cursor(1),
+            KeyCode::Backspace => picker.pop(),
+            // Toggle a breakpoint; stay open to pick several.
+            KeyCode::Enter => {
+                let Some(f) = picker.selected().cloned() else {
+                    return;
+                };
+                let cmd = match self.function_breakpoint(&f) {
+                    Some(bp) => Command::DeleteBreakpoint(bp.id),
+                    None => Command::Break(Location::Function(self.function_location(&f))),
+                };
+                self.log_scroll = 0;
+                self.execute(cmd);
+            }
+            // Show the declaration in the source pane.
+            KeyCode::Char('o') if ctrl => {
+                let Some(f) = picker.selected().cloned() else {
+                    return;
+                };
+                self.functions = None;
+                self.open_source(&f.path);
+                self.cursor = f.line.max(1);
+                self.focus = Focus::Source;
+            }
+            KeyCode::Char(c) if !ctrl => picker.push(c),
+            _ => {}
+        }
     }
 
     fn open_picker(&mut self) {

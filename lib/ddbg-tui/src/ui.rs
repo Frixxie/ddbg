@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Status};
-use crate::picker::{Picker, PickerItem, ProgramPicker, TestPicker};
+use crate::picker::{FunctionPicker, Picker, PickerItem, ProgramPicker, TestPicker};
 
 const KEYS: &[(&str, &str)] = &[
     ("r", "run / restart"),
@@ -26,6 +26,7 @@ const KEYS: &[(&str, &str)] = &[
     ("g / G", "top / bottom"),
     ("Tab", "cycle focus: source, stack, log"),
     ("t", "pick a test to debug or run"),
+    ("F", "find functions to break on"),
     (":", "command line (REPL syntax)"),
     ("q", "quit"),
 ];
@@ -59,6 +60,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if let Some(picker) = &app.programs {
         draw_programs(f, app, picker);
+    }
+    if let Some(picker) = &app.functions {
+        draw_functions(f, app, picker);
     }
     if app.show_help {
         draw_help(f);
@@ -133,6 +137,41 @@ fn draw_programs(f: &mut Frame, app: &App, picker: &ProgramPicker) {
         detail,
         "no matching programs",
         "Enter run  ^B run+stop on entry  ↑/↓ move  Esc close",
+    );
+}
+
+fn draw_functions(f: &mut Frame, app: &App, picker: &FunctionPicker) {
+    let title = match &picker.items {
+        None => "functions (scanning...)".to_owned(),
+        Some(all) => format!("functions {}/{}", picker.matches().len(), all.len()),
+    };
+    let detail = picker.selected().map(|func| {
+        let path = func.path.strip_prefix(&app.cwd).unwrap_or(&func.path);
+        format!("{}:{}", path.display(), func.line)
+    });
+    draw_filter_list(
+        f,
+        picker,
+        &title,
+        |func| {
+            let mark = match app.function_breakpoint(func) {
+                Some(bp) if bp.verified => Span::styled("● ", Style::new().fg(Color::Red)),
+                Some(_) => Span::styled("○ ", Style::new().fg(Color::Red)),
+                None => Span::raw("  "),
+            };
+            let path = func.path.strip_prefix(&app.cwd).unwrap_or(&func.path);
+            Line::from(vec![
+                mark,
+                Span::raw(func.qualified.clone()),
+                Span::styled(
+                    format!("  {}:{}", path.display(), func.line),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ])
+        },
+        detail,
+        "no matching functions",
+        "Enter toggle breakpoint  ^O show source  ↑/↓ move  Esc close",
     );
 }
 
@@ -448,7 +487,7 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             f.set_cursor_position((area.x + 1 + input.chars().count() as u16, area.y));
         }
         None => {
-            let hint = "r run  e program  c cont  n next  s step  f finish  b break  t tests  : cmd  ? help  q quit";
+            let hint = "r run  e program  c cont  n next  s step  f finish  b break  F funcs  t tests  : cmd  ? help  q quit";
             f.render_widget(Line::styled(hint, Style::new().fg(Color::DarkGray)), area);
         }
     }

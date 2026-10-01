@@ -9,6 +9,7 @@
 //! events, so the screen stays responsive while a test builds.
 
 mod app;
+mod functions;
 mod picker;
 mod ui;
 
@@ -33,6 +34,8 @@ pub(crate) enum Msg {
     },
     Progress(String),
     EventsLagged(u64),
+    /// Result of function discovery.
+    Functions(Vec<functions::Function>),
 }
 
 /// Spawns commands without blocking the UI.
@@ -53,6 +56,14 @@ impl Executor {
             };
             let outcome = session.lock().await.execute(cmd, &mut progress).await;
             let _ = tx.send(Msg::Done { outcome, silent });
+        });
+    }
+
+    /// Scan sources under `root` for functions off the UI thread.
+    pub(crate) fn discover_functions(&self, root: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(Msg::Functions(functions::discover(&root)));
         });
     }
 

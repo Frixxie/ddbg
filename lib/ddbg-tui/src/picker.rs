@@ -43,6 +43,7 @@ impl PickerItem for Program {
 
 pub type TestPicker = Picker<TestCase>;
 pub type ProgramPicker = Picker<Program>;
+pub type FunctionPicker = Picker<crate::functions::Function>;
 
 pub struct Picker<T> {
     /// `None` while discovery is in progress.
