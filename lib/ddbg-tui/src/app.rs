@@ -10,10 +10,10 @@ use ddbg_cli::testing::render_list;
 use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation, path_matches};
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::frame::StackFrame;
-use ddbg_core::{DebugEvent, EngineHandle};
+use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::picker::TestPicker;
+use crate::picker::{Program, ProgramPicker, TestPicker};
 use crate::{Executor, Msg};
 
 const MAX_LOG_LINES: usize = 5000;
@@ -90,10 +90,23 @@ pub struct App {
 
     /// Open test picker.
     pub picker: Option<TestPicker>,
+    /// Open program picker.
+    pub programs: Option<ProgramPicker>,
+    /// Binaries found by project detection.
+    pub candidates: Vec<PathBuf>,
+    /// Program the next `run` launches, if known.
+    pub program: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(exec: Executor, engine: EngineHandle, cwd: PathBuf, verbose: bool) -> Self {
+    pub fn new(
+        exec: Executor,
+        engine: EngineHandle,
+        cwd: PathBuf,
+        verbose: bool,
+        candidates: Vec<PathBuf>,
+        program: Option<PathBuf>,
+    ) -> Self {
         let mut renderer = Renderer::new(cwd.clone());
         renderer.show_console = verbose;
         Self {
@@ -121,6 +134,9 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             picker: None,
+            programs: None,
+            candidates,
+            program,
         }
     }
 
@@ -214,7 +230,7 @@ impl App {
                 self.apply_reply(reply);
             }
             Outcome::Tests(tests) => match &mut self.picker {
-                Some(picker) if picker.tests.is_none() => picker.set_tests(tests),
+                Some(picker) if picker.items.is_none() => picker.set_items(tests),
                 _ if silent => {}
                 _ => self.log(render_list(&tests)),
             },
@@ -223,7 +239,7 @@ impl App {
             Outcome::Error(_) if silent => {}
             Outcome::Error(e) => {
                 // A failed discovery should not leave the picker loading.
-                if self.picker.as_ref().is_some_and(|p| p.tests.is_none()) {
+                if self.picker.as_ref().is_some_and(|p| p.items.is_none()) {
                     self.picker = None;
                 }
                 self.log(format!("error: {e}"));
@@ -353,17 +369,26 @@ impl App {
             self.picker_key(key);
             return;
         }
+        if self.programs.is_some() {
+            self.program_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => self.execute(Command::Quit),
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('t') => self.open_picker(),
+            KeyCode::Char('e') => self.open_program_picker(),
             KeyCode::Char(':') => {
                 self.input = Some(String::new());
                 self.history_pos = None;
             }
             KeyCode::Tab => self.focus = self.focus.next(),
 
+            // Nothing to run yet: let the user choose first.
+            KeyCode::Char('r') if self.program.is_none() && !self.candidates.is_empty() => {
+                self.open_program_picker()
+            }
             KeyCode::Char('r') => self.execute(Command::Run(None)),
             KeyCode::Char('c') | KeyCode::F(5) => self.execute(Command::Continue),
             KeyCode::Char('p') => self.exec.pause(&self.engine),
@@ -394,6 +419,62 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    pub fn open_program_picker(&mut self) {
+        if self.candidates.is_empty() {
+            self.log("error: no programs detected; use `:run <program>`");
+            return;
+        }
+        let programs = self
+            .candidates
+            .iter()
+            .map(|p| Program::new(p.clone(), &self.cwd))
+            .collect();
+        let mut picker = ProgramPicker::with_items(programs);
+        // Start on the current program so Enter restarts it.
+        if let Some(i) = self
+            .program
+            .as_ref()
+            .and_then(|cur| self.candidates.iter().position(|c| c == cur))
+        {
+            picker.cursor = i;
+        }
+        self.programs = Some(picker);
+    }
+
+    /// Keys while the program picker is open.
+    fn program_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.programs.as_mut() else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let stop_on_entry = match key.code {
+            KeyCode::Esc => {
+                self.programs = None;
+                return;
+            }
+            KeyCode::Up => return picker.move_cursor(-1),
+            KeyCode::Down => return picker.move_cursor(1),
+            KeyCode::PageUp => return picker.move_cursor(-10),
+            KeyCode::PageDown => return picker.move_cursor(10),
+            KeyCode::Char('p') if ctrl => return picker.move_cursor(-1),
+            KeyCode::Char('n') if ctrl => return picker.move_cursor(1),
+            KeyCode::Backspace => return picker.pop(),
+            KeyCode::Enter => false,
+            KeyCode::Char('b') if ctrl => true,
+            KeyCode::Char(c) if !ctrl => return picker.push(c),
+            _ => return,
+        };
+        let Some(path) = picker.selected().map(|p| p.path.clone()) else {
+            return;
+        };
+        self.programs = None;
+        self.log_scroll = 0;
+        let mut target = LaunchTarget::new(path.clone(), Vec::new());
+        target.stop_on_entry = stop_on_entry;
+        self.program = Some(path);
+        self.execute(Command::Run(Some(target)));
     }
 
     fn open_picker(&mut self) {
@@ -495,7 +576,12 @@ impl App {
         match parse(&line) {
             Ok(Input::Empty) => {}
             Ok(Input::Help(topic)) => self.log(help(topic.as_deref())),
-            Ok(Input::Command(cmd)) => self.execute(cmd),
+            Ok(Input::Command(cmd)) => {
+                if let Command::Run(Some(t)) = &cmd {
+                    self.program = Some(t.program.clone());
+                }
+                self.execute(cmd)
+            }
             Err(e) => self.log(format!("error: {e}")),
         }
     }

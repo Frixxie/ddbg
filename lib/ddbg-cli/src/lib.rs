@@ -28,6 +28,9 @@ pub struct Prepared {
     /// Commands to execute before handing control to the user.
     pub initial: Vec<Command>,
     pub verbose: bool,
+    /// Program the engine starts with, if one was given or detected. When
+    /// `None`, frontends can offer [`Session::candidates`] to pick from.
+    pub program: Option<std::path::PathBuf>,
 }
 
 /// Entry point used by the `ddbg` binary when no other frontend is chosen.
@@ -95,6 +98,7 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         initial.push(Command::Run(None));
     }
 
+    let program = target.as_ref().map(|t| t.program.clone());
     let engine = engine::spawn(EngineConfig {
         adapter,
         cwd: cwd.clone(),
@@ -126,6 +130,7 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         },
         initial,
         verbose: args.verbose,
+        program,
     }))
 }
 

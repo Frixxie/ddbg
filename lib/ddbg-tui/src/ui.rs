@@ -7,10 +7,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Status};
-use crate::picker::TestPicker;
+use crate::picker::{Picker, PickerItem, ProgramPicker, TestPicker};
 
 const KEYS: &[(&str, &str)] = &[
     ("r", "run / restart"),
+    ("e", "pick program to run"),
     ("c, F5", "continue"),
     ("p, Ctrl-C", "pause"),
     ("n, F10", "next (step over)"),
@@ -56,6 +57,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(picker) = &app.picker {
         draw_picker(f, app, picker);
     }
+    if let Some(picker) = &app.programs {
+        draw_programs(f, app, picker);
+    }
     if app.show_help {
         draw_help(f);
     }
@@ -73,19 +77,84 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn draw_picker(f: &mut Frame, app: &App, picker: &TestPicker) {
+    let title = match &picker.items {
+        None => "tests (discovering...)".to_owned(),
+        Some(all) => format!("tests {}/{}", picker.matches().len(), all.len()),
+    };
+    let detail = picker.selected().and_then(|t| {
+        let src = t.source.as_ref()?;
+        let path = src.strip_prefix(&app.cwd).unwrap_or(src).display();
+        Some(match t.line {
+            Some(l) => format!("{path}:{l}"),
+            None => path.to_string(),
+        })
+    });
+    draw_filter_list(
+        f,
+        picker,
+        &title,
+        |t| {
+            let mut spans = vec![Span::raw(t.name.clone())];
+            if t.display_name != t.name {
+                spans.push(Span::styled(
+                    format!("  {}", t.display_name),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        },
+        detail,
+        "no matching tests",
+        "Enter debug  ^B debug+break  ^R run  ↑/↓ move  Esc close",
+    );
+}
+
+fn draw_programs(f: &mut Frame, app: &App, picker: &ProgramPicker) {
+    let total = picker.items.as_ref().map_or(0, Vec::len);
+    let title = format!("programs {}/{}", picker.matches().len(), total);
+    let detail = picker.selected().map(|p| {
+        let built = if p.path.exists() { "" } else { "  (not built)" };
+        format!("{}{built}", p.path.display())
+    });
+    draw_filter_list(
+        f,
+        picker,
+        &title,
+        |p| {
+            let mut spans = vec![Span::raw(p.label.clone())];
+            if app.program.as_ref() == Some(&p.path) {
+                spans.push(Span::styled("  (current)", Style::new().fg(Color::Yellow)));
+            }
+            if !p.path.exists() {
+                spans.push(Span::styled("  not built", Style::new().fg(Color::Red)));
+            }
+            Line::from(spans)
+        },
+        detail,
+        "no matching programs",
+        "Enter run  ^B run+stop on entry  ↑/↓ move  Esc close",
+    );
+}
+
+/// Centered popup with a filter line, a list, a detail line and key hints.
+fn draw_filter_list<T: PickerItem>(
+    f: &mut Frame,
+    picker: &Picker<T>,
+    title: &str,
+    item: impl Fn(&T) -> Line<'static>,
+    detail: Option<String>,
+    empty_text: &str,
+    hint_text: &str,
+) {
     let area = f.area();
     let rect = centered(area, area.width * 4 / 5, area.height * 4 / 5);
     let matches = picker.matches();
-    let title = match &picker.tests {
-        None => "tests (discovering...)".to_owned(),
-        Some(all) => format!("tests {}/{}", matches.len(), all.len()),
-    };
-    let block = block(&title, true);
+    let block = block(title, true);
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
 
-    let [filter, list, detail, hint] = Layout::vertical([
+    let [filter, list, detail_area, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
@@ -105,24 +174,12 @@ fn draw_picker(f: &mut Frame, app: &App, picker: &TestPicker) {
         filter.y,
     ));
 
-    let items: Vec<ListItem> = matches
-        .iter()
-        .map(|t| {
-            let mut spans = vec![Span::raw(t.name.clone())];
-            if t.display_name != t.name {
-                spans.push(Span::styled(
-                    format!("  {}", t.display_name),
-                    Style::new().fg(Color::DarkGray),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+    let items: Vec<ListItem> = matches.iter().map(|t| ListItem::new(item(t))).collect();
     let mut state = ListState::default();
     if !matches.is_empty() {
         state.select(Some(picker.cursor));
     }
-    let empty = picker.tests.is_some() && matches.is_empty();
+    let empty = picker.items.is_some() && matches.is_empty();
     f.render_stateful_widget(
         List::new(items).highlight_style(Style::new().reversed()),
         list,
@@ -130,26 +187,18 @@ fn draw_picker(f: &mut Frame, app: &App, picker: &TestPicker) {
     );
     if empty {
         f.render_widget(
-            Line::styled("no matching tests", Style::new().fg(Color::DarkGray)),
+            Line::styled(empty_text.to_owned(), Style::new().fg(Color::DarkGray)),
             list,
         );
     }
-
-    if let Some(t) = picker.selected()
-        && let Some(src) = &t.source
-    {
-        let path = src.strip_prefix(&app.cwd).unwrap_or(src).display();
-        let loc = match t.line {
-            Some(l) => format!("{path}:{l}"),
-            None => path.to_string(),
-        };
-        f.render_widget(Line::styled(loc, Style::new().fg(Color::DarkGray)), detail);
+    if let Some(detail) = detail {
+        f.render_widget(
+            Line::styled(detail, Style::new().fg(Color::DarkGray)),
+            detail_area,
+        );
     }
     f.render_widget(
-        Line::styled(
-            "Enter debug  ^B debug+break  ^R run  ↑/↓ move  Esc close",
-            Style::new().fg(Color::DarkGray),
-        ),
+        Line::styled(hint_text.to_owned(), Style::new().fg(Color::DarkGray)),
         hint,
     );
 }
@@ -178,6 +227,18 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(text, Style::new().fg(color).bold()),
     ];
+    if let Some(program) = &app.program {
+        let name = program.strip_prefix(&app.cwd).unwrap_or(program).display();
+        spans.push(Span::styled(
+            format!("  {name}"),
+            Style::new().fg(Color::Cyan),
+        ));
+    } else if !app.candidates.is_empty() {
+        spans.push(Span::styled(
+            "  no program (e to pick)",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
     if app.busy > 0 {
         spans.push(Span::styled(
             "  working...",
@@ -387,8 +448,7 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             f.set_cursor_position((area.x + 1 + input.chars().count() as u16, area.y));
         }
         None => {
-            let hint =
-                "r run  c cont  n next  s step  f finish  b break  t tests  : cmd  ? help  q quit";
+            let hint = "r run  e program  c cont  n next  s step  f finish  b break  t tests  : cmd  ? help  q quit";
             f.render_widget(Line::styled(hint, Style::new().fg(Color::DarkGray)), area);
         }
     }

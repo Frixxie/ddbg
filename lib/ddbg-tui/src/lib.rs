@@ -72,6 +72,7 @@ pub async fn run(prepared: Prepared) -> anyhow::Result<()> {
         session,
         initial,
         verbose,
+        program,
     } = prepared;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -103,11 +104,12 @@ pub async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     let engine = session.engine.clone();
     let cwd = session.cwd.clone();
+    let candidates = session.candidates.clone();
     let exec = Executor {
         session: Arc::new(Mutex::new(session)),
         tx,
     };
-    let mut app = App::new(exec, engine, cwd, verbose);
+    let mut app = App::new(exec, engine, cwd, verbose, candidates, program);
     app.log(format!(
         "ddbg {}. Press ? for keys, : for commands.",
         env!("CARGO_PKG_VERSION")
@@ -115,6 +117,10 @@ pub async fn run(prepared: Prepared) -> anyhow::Result<()> {
     app.refresh_breakpoints();
     for cmd in initial {
         app.execute(cmd);
+    }
+    // Several binaries and none chosen: ask up front.
+    if app.program.is_none() && app.candidates.len() > 1 {
+        app.open_program_picker();
     }
 
     let mut terminal = ratatui::init();
