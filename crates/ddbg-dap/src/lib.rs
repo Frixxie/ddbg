@@ -8,3 +8,8 @@ pub mod error;
 pub mod protocol;
 
 pub use error::{CodecError, DapError, Result};
+pub mod client;
+pub mod transport;
+
+pub use client::{DapClient, Incoming};
+pub use transport::{AdapterCommand, AdapterProcess};
