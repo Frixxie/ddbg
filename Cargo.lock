@@ -442,6 +442,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ddbg-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ddbg-cli",
+ "ddbg-core",
+ "ddbg-dap",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ddbg-project"
 version = "0.1.0"
 dependencies = [

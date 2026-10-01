@@ -212,7 +212,7 @@ End-to-end tests against real adapters (`fixtures/hello-rust`, `hello-c` via
 have `debugpy`):
 
 ```console
-cargo test -p ddbg-core -- --ignored
+cargo test -p ddbg-core -p ddbg-driver -- --ignored
 ```
 
 ### Layout
@@ -223,5 +223,6 @@ cargo test -p ddbg-core -- --ignored
 | `lib/ddbg-core` | Debug engine, session state, adapter integrations |
 | `lib/ddbg-cli` | REPL frontend (library) |
 | `lib/ddbg-tui` | Full-screen terminal UI (ratatui) |
+| `lib/ddbg-driver` | Programmatic driver: run REPL commands from code (typed or text), for tests and scripting |
 | `bin/ddbg` | The `ddbg` binary |
 | `lib/ddbg-project` | Project detection (Cargo, .NET, Python, C/C++) |

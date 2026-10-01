@@ -58,8 +58,13 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         return Ok(None);
     }
 
-    let cwd = std::env::current_dir()?;
+    prepare(args, std::env::current_dir()?).map(Some)
+}
 
+/// Build a debug session from `args` as if `ddbg` was started in `cwd`,
+/// without initializing logging or running subcommands. Used by
+/// [`start`] and by programmatic drivers such as `ddbg-driver`.
+pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared> {
     let mut target = args
         .program
         .split_first()
@@ -73,6 +78,7 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         target = discover_target(project);
     }
     if let Some(t) = &mut target {
+        t.cwd.clone_from(&cwd);
         t.stop_on_entry = args.stop_on_entry;
         apply_dotnet_launch(t);
     }
@@ -128,7 +134,7 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         None => testing::Tests::new(None, "no project detected; cannot discover tests"),
     };
     let candidates = project.map(|p| p.candidates).unwrap_or_default();
-    Ok(Some(Prepared {
+    Ok(Prepared {
         session: Session {
             engine,
             cwd,
@@ -138,7 +144,7 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         initial,
         verbose: args.verbose,
         program,
-    }))
+    })
 }
 
 /// For .NET assemblies, run from the project directory with the environment

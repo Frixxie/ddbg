@@ -15,6 +15,7 @@ ddbg-cli = { path = "lib/ddbg-cli" }
 ddbg-project = { path = "lib/ddbg-project" }
 ddbg-test = { path = "lib/ddbg-test" }
 ddbg-tui = { path = "lib/ddbg-tui" }
+ddbg-driver = { path = "lib/ddbg-driver" }
 
 anyhow = "1"
 bytes = "1"

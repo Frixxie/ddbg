@@ -79,6 +79,7 @@ impl Session {
             };
         }
         if let Command::Run(Some(t)) = &mut cmd {
+            t.cwd.clone_from(&self.cwd);
             if let Some(p) = resolve_program(&t.program, &self.cwd, &self.candidates) {
                 t.program = p;
             }

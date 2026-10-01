@@ -1,0 +1,15 @@
+[package]
+name = "ddbg-driver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ddbg-core.workspace = true
+ddbg-cli.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+ddbg-dap.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
