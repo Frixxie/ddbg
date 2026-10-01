@@ -103,13 +103,16 @@ pub fn rust_init_commands() -> Vec<String> {
     let etc = Path::new(&sysroot).join("lib/rustlib/etc");
     let lookup = etc.join("lldb_lookup.py");
     let commands = etc.join("lldb_commands");
-    if !lookup.is_file() || !commands.is_file() {
+    if !lookup.is_file() {
         return Vec::new();
     }
-    vec![
-        format!("command script import \"{}\"", lookup.display()),
-        format!("command source -s 0 \"{}\"", commands.display()),
-    ]
+    // Newer toolchains register everything from `__lldb_init_module`; older
+    // ones additionally ship an `lldb_commands` file.
+    let mut init = vec![format!("command script import \"{}\"", lookup.display())];
+    if commands.is_file() {
+        init.push(format!("command source -s 0 \"{}\"", commands.display()));
+    }
+    init
 }
 
 impl DebugAdapter for LldbDapAdapter {

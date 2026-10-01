@@ -15,6 +15,10 @@ pub struct Args {
     #[arg(long, value_name = "FILE", global = true)]
     pub log_dap: Option<PathBuf>,
 
+    /// Show debug adapter console messages.
+    #[arg(short, long)]
+    pub verbose: bool,
+
     /// Stop at the program entry point after launching.
     #[arg(long)]
     pub stop_on_entry: bool,

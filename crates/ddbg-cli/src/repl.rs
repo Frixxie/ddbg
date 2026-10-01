@@ -84,10 +84,17 @@ fn build_editor(printer: ExternalPrinter<String>) -> Reedline {
 }
 
 /// Run the interactive loop until `quit` or Ctrl-D.
-pub async fn run(engine: EngineHandle, cwd: PathBuf, initial: Vec<Command>) -> anyhow::Result<()> {
+pub async fn run(
+    engine: EngineHandle,
+    cwd: PathBuf,
+    initial: Vec<Command>,
+    verbose: bool,
+) -> anyhow::Result<()> {
     let printer = ExternalPrinter::<String>::new(4096);
     let out = printer.sender();
-    let renderer = Arc::new(Mutex::new(Renderer::new(cwd)));
+    let mut renderer = Renderer::new(cwd);
+    renderer.show_console = verbose;
+    let renderer = Arc::new(Mutex::new(renderer));
 
     // Async debugger events → printer.
     let mut events = engine.subscribe();

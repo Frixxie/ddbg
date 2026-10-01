@@ -625,9 +625,16 @@ impl Engine {
                 self.emit(DebugEvent::ThreadsChanged);
             }
             DapEvent::Breakpoint(b) => {
+                let before = b
+                    .breakpoint
+                    .id
+                    .and_then(|id| self.session.breakpoints.by_adapter_id(id))
+                    .cloned();
                 if let Some(id) = self.session.breakpoints.apply_event(&b.breakpoint) {
                     let bp = self.session.breakpoints.get(id).unwrap().clone();
-                    self.emit(DebugEvent::BreakpointChanged(bp));
+                    if before.as_ref() != Some(&bp) {
+                        self.emit(DebugEvent::BreakpointChanged(bp));
+                    }
                 }
             }
             DapEvent::Initialized => {}

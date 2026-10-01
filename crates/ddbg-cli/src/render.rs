@@ -21,6 +21,8 @@ pub struct Renderer {
     exited: bool,
     /// Partial output lines per category.
     pending_output: HashMap<u8, String>,
+    /// Show adapter console messages (debugger chatter).
+    pub show_console: bool,
 }
 
 impl Renderer {
@@ -31,6 +33,7 @@ impl Renderer {
             last_function: None,
             exited: false,
             pending_output: HashMap::new(),
+            show_console: false,
         }
     }
 
@@ -106,6 +109,11 @@ impl Renderer {
                 bp.id,
                 self.bp_location(bp)
             )),
+            DebugEvent::Output(o)
+                if o.category == OutputCategory::Console && !self.show_console =>
+            {
+                None
+            }
             DebugEvent::Output(o) => self.output(o.category, &o.text),
             _ => None,
         }
@@ -266,7 +274,7 @@ impl Renderer {
             }
             Reply::Value(eval, children) => {
                 let mut s = eval.value.clone();
-                if !children.is_empty() {
+                if !children.is_empty() && needs_expansion(&eval.value, eval.type_name.as_deref()) {
                     s.push_str(" {\n");
                     for v in children {
                         let _ = writeln!(s, "    {}", variable(v));
@@ -299,6 +307,16 @@ impl Renderer {
         let loc = bp.resolved.as_ref().unwrap_or(&bp.requested);
         format!("{}:{}", self.display_path(&loc.path), loc.line)
     }
+}
+
+/// Whether a value's summary is uninformative enough that its children
+/// should be shown (e.g. `Foo @ 0x1234`, `{...}`, `{MyApp.Foo}`).
+fn needs_expansion(value: &str, type_name: Option<&str>) -> bool {
+    let v = value.trim();
+    v.is_empty()
+        || v.contains(" @ 0x")
+        || v.ends_with("{...}")
+        || type_name.is_some_and(|t| v == t || v == format!("{{{t}}}"))
 }
 
 fn variable(v: &Variable) -> String {
@@ -378,6 +396,14 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(out, "3 > }");
+    }
+
+    #[test]
+    fn expansion_heuristic() {
+        assert!(needs_expansion("Point @ 0x1000", None));
+        assert!(needs_expansion("{MyApp.User}", Some("MyApp.User")));
+        assert!(!needs_expansion("\"hello\"", Some("String")));
+        assert!(!needs_expansion("{x:3, y:4}", Some("Point")));
     }
 
     #[test]

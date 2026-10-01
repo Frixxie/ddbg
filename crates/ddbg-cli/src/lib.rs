@@ -54,5 +54,5 @@ pub async fn run() -> anyhow::Result<()> {
         cwd: cwd.clone(),
         target,
     });
-    repl::run(engine, cwd, initial).await
+    repl::run(engine, cwd, initial, args.verbose).await
 }
