@@ -31,6 +31,10 @@ pub struct Args {
     #[arg(long)]
     pub no_detect: bool,
 
+    /// Use the full-screen terminal UI instead of the line REPL.
+    #[arg(long)]
+    pub tui: bool,
+
     #[command(subcommand)]
     pub command: Option<Subcommand>,
 

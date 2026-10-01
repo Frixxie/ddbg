@@ -1,10 +1,11 @@
 [package]
-name = "ddbg"
+name = "ddbg-tui"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ddbg-core.workspace = true
 ddbg-cli.workspace = true
-ddbg-tui.workspace = true
 anyhow.workspace = true
+ratatui.workspace = true
 tokio.workspace = true

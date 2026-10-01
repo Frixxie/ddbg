@@ -72,6 +72,7 @@ Process exited normally.
 |---|---|
 | `-- <program> [args...]` | Program to debug and its arguments |
 | `--run` | Launch immediately instead of waiting for `run` |
+| `--tui` | Full-screen terminal UI (experimental; `?` lists keys, `:` takes REPL commands) |
 | `--stop-on-entry` | Launch and stop at the program entry point |
 | `--adapter "<cmd> [args]"` | Debug adapter command (default `lldb-dap`), e.g. `--adapter "netcoredbg --interpreter=vscode"` |
 | `-v`, `--verbose` | Show debug adapter console messages |

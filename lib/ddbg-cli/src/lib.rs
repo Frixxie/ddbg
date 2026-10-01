@@ -5,13 +5,14 @@ mod args;
 mod commands;
 mod logging;
 pub mod parser;
-mod render;
+pub mod render;
 mod repl;
-mod testing;
+pub mod session;
+pub mod testing;
 
 use std::sync::Arc;
 
-use clap::Parser;
+pub use clap::Parser;
 use ddbg_core::adapter::{DebugAdapter, LldbDapAdapter, NetCoreDbgAdapter, adapter_for_command};
 use ddbg_core::command::Command;
 use ddbg_core::{EngineConfig, LaunchTarget, engine};
@@ -19,14 +20,37 @@ use ddbg_project::{Project, ProjectKind};
 use ddbg_test::{AnyProvider, DotNetTestProvider, RustTestProvider};
 
 pub use args::{Args, Subcommand};
+pub use session::{Outcome, Session};
 
-/// Entry point used by the `ddbg` binary.
+/// Everything a frontend needs to start: a running engine and setup.
+pub struct Prepared {
+    pub session: Session,
+    /// Commands to execute before handing control to the user.
+    pub initial: Vec<Command>,
+    pub verbose: bool,
+}
+
+/// Entry point used by the `ddbg` binary when no other frontend is chosen.
 pub async fn run() -> anyhow::Result<()> {
-    let args = Args::parse();
-    logging::init(&args)?;
+    run_with(Args::parse()).await
+}
+
+/// Run the REPL frontend with already-parsed arguments.
+pub async fn run_with(args: Args) -> anyhow::Result<()> {
+    match start(&args).await? {
+        Some(p) => repl::run(p.session, p.initial, p.verbose).await,
+        None => Ok(()),
+    }
+}
+
+/// Initialize logging and handle subcommands. Returns `None` when a
+/// subcommand ran to completion, otherwise the prepared debug session.
+pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
+    logging::init(args)?;
 
     if let Some(Subcommand::AdapterTest { adapter }) = &args.command {
-        return adapter_test::run(adapter).await;
+        adapter_test::run(adapter).await?;
+        return Ok(None);
     }
 
     let cwd = std::env::current_dir()?;
@@ -93,7 +117,16 @@ pub async fn run() -> anyhow::Result<()> {
         None => testing::Tests::new(None, "no project detected; cannot discover tests"),
     };
     let candidates = project.map(|p| p.candidates).unwrap_or_default();
-    repl::run(engine, cwd, initial, args.verbose, candidates, tests).await
+    Ok(Some(Prepared {
+        session: Session {
+            engine,
+            cwd,
+            candidates,
+            tests,
+        },
+        initial,
+        verbose: args.verbose,
+    }))
 }
 
 /// For .NET assemblies, run from the project directory with the environment
