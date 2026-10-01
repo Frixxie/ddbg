@@ -15,14 +15,19 @@ pub struct Scope {
     pub name: String,
     pub reference: VarRef,
     pub expensive: bool,
+    /// The adapter marked this scope as local variables.
+    pub is_locals: bool,
 }
 
 impl From<dap::Scope> for Scope {
     fn from(s: dap::Scope) -> Self {
+        let is_locals = s.presentation_hint.as_deref() == Some("locals")
+            || s.name.eq_ignore_ascii_case("locals");
         Self {
             name: s.name,
             reference: VarRef(s.variables_reference),
             expensive: s.expensive,
+            is_locals,
         }
     }
 }

@@ -86,7 +86,8 @@ pub enum Reply {
         index: usize,
         frame: StackFrame,
     },
-    Value(Evaluation),
+    /// An evaluated expression and (one level of) its children.
+    Value(Evaluation, Vec<Variable>),
     Locals(Vec<ScopeVariables>),
     Quit,
 }
