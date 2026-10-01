@@ -1,0 +1,397 @@
+//! Formatting of replies and events for the terminal.
+
+use std::collections::HashMap;
+use std::fmt::Write;
+use std::path::{Path, PathBuf};
+
+use ddbg_core::DebugEvent;
+use ddbg_core::breakpoint::Breakpoint;
+use ddbg_core::command::{Command, Reply};
+use ddbg_core::event::{OutputCategory, StopInfo};
+use ddbg_core::frame::StackFrame;
+use ddbg_core::session::StopReason;
+use ddbg_core::variable::Variable;
+
+use crate::parser::COMMANDS;
+
+pub struct Renderer {
+    cwd: PathBuf,
+    sources: HashMap<PathBuf, Option<Vec<String>>>,
+    last_function: Option<String>,
+    exited: bool,
+    /// Partial output lines per category.
+    pending_output: HashMap<u8, String>,
+}
+
+impl Renderer {
+    pub fn new(cwd: PathBuf) -> Self {
+        Self {
+            cwd,
+            sources: HashMap::new(),
+            last_function: None,
+            exited: false,
+            pending_output: HashMap::new(),
+        }
+    }
+
+    fn display_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.cwd)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+
+    fn source_line(&mut self, path: &Path, line: u32) -> Option<String> {
+        let lines = self
+            .sources
+            .entry(path.to_path_buf())
+            .or_insert_with(|| {
+                std::fs::read_to_string(path)
+                    .ok()
+                    .map(|s| s.lines().map(str::to_owned).collect())
+            })
+            .as_ref()?;
+        let text = lines.get(line.checked_sub(1)? as usize)?;
+        Some(format!("{line} > {}", text.trim_end()))
+    }
+
+    fn frame_location(&self, frame: &StackFrame) -> String {
+        match (&frame.path, &frame.source_name) {
+            (Some(p), _) => format!("{}:{}", self.display_path(p), frame.line),
+            (None, Some(n)) => format!("{n}:{}", frame.line),
+            (None, None) => "<no source>".into(),
+        }
+    }
+
+    fn frame_with_source(&mut self, frame: &StackFrame, out: &mut String) {
+        if let Some(path) = frame.path.clone()
+            && let Some(line) = self.source_line(&path, frame.line)
+        {
+            let _ = writeln!(out, "\n{line}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
+
+    pub fn event(&mut self, event: &DebugEvent) -> Option<String> {
+        match event {
+            DebugEvent::SessionStarted => {
+                self.exited = false;
+                self.last_function = None;
+                None
+            }
+            DebugEvent::SessionStopped(info) => Some(self.stopped(info)),
+            DebugEvent::SessionContinued => None,
+            DebugEvent::SessionExited(code) => {
+                self.exited = true;
+                let mut out = self.flush_output();
+                if *code == 0 {
+                    out.push_str("Process exited normally.");
+                } else {
+                    let _ = write!(out, "Process exited with code {code}.");
+                }
+                Some(out)
+            }
+            DebugEvent::SessionTerminated => {
+                let mut out = self.flush_output();
+                if !std::mem::replace(&mut self.exited, false) {
+                    out.push_str("Debug session ended.");
+                }
+                (!out.is_empty()).then_some(out)
+            }
+            DebugEvent::BreakpointChanged(bp) if bp.verified => Some(format!(
+                "Breakpoint {} resolved at {}",
+                bp.id,
+                self.bp_location(bp)
+            )),
+            DebugEvent::Output(o) => self.output(o.category, &o.text),
+            _ => None,
+        }
+    }
+
+    fn stopped(&mut self, info: &StopInfo) -> String {
+        let mut out = self.flush_output();
+        let function = info.frame.as_ref().map(|f| f.name.clone());
+        let same_function = function.is_some() && function == self.last_function;
+        self.last_function = function;
+
+        let header = match &info.reason {
+            StopReason::Breakpoint(ids) if !ids.is_empty() => {
+                let ids: Vec<_> = ids.iter().map(|i| i.to_string()).collect();
+                Some(format!("Breakpoint {}", ids.join(", ")))
+            }
+            StopReason::Breakpoint(_) => Some("Breakpoint".into()),
+            StopReason::Step if same_function => None,
+            StopReason::Step => Some("Stepped".into()),
+            StopReason::Pause => Some("Paused".into()),
+            StopReason::Entry => Some("Stopped at entry".into()),
+            StopReason::Exception(text) => Some(format!(
+                "Exception{}",
+                text.as_deref()
+                    .map(|t| format!(": {t}"))
+                    .unwrap_or_default()
+            )),
+            StopReason::Other(r) => Some(format!("Stopped ({r})")),
+        };
+
+        let mut lines = Vec::new();
+        match &info.frame {
+            Some(frame) => {
+                if let Some(h) = header {
+                    lines.push(format!(
+                        "{h}, {} at {}",
+                        frame.name,
+                        self.frame_location(frame)
+                    ));
+                    if let (StopReason::Exception(_), Some(desc)) =
+                        (&info.reason, &info.description)
+                    {
+                        lines.push(desc.clone());
+                    }
+                }
+                let src = frame
+                    .path
+                    .clone()
+                    .and_then(|p| self.source_line(&p, frame.line));
+                match src {
+                    Some(src) => {
+                        if !lines.is_empty() {
+                            lines.push(String::new());
+                        }
+                        lines.push(src);
+                    }
+                    None if lines.is_empty() => {
+                        lines.push(format!("{} at {}", frame.name, self.frame_location(frame)));
+                    }
+                    None => {}
+                }
+            }
+            None => lines.push(header.unwrap_or_else(|| "Stopped".into())),
+        }
+        out.push_str(&lines.join("\n"));
+        out.trim_end().to_owned()
+    }
+
+    fn output(&mut self, category: OutputCategory, text: &str) -> Option<String> {
+        let key = category as u8;
+        let buf = self.pending_output.entry(key).or_default();
+        buf.push_str(text);
+        let end = buf.rfind('\n')?;
+        let complete: String = buf.drain(..=end).collect();
+        Some(complete.trim_end_matches('\n').to_owned())
+    }
+
+    /// Emit any partial output lines.
+    fn flush_output(&mut self) -> String {
+        let mut out = String::new();
+        for buf in self.pending_output.values_mut() {
+            if !buf.is_empty() {
+                out.push_str(buf);
+                out.push('\n');
+                buf.clear();
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // Replies
+    // -----------------------------------------------------------------------
+
+    pub fn reply(&mut self, command: &Command, reply: &Reply) -> Option<String> {
+        match reply {
+            Reply::Ok => match command {
+                Command::Continue => Some("Continuing.".into()),
+                _ => None,
+            },
+            Reply::Launched(program) => {
+                Some(format!("Starting program: {}", self.display_path(program)))
+            }
+            Reply::BreakpointSet { breakpoint, new } => {
+                let mut s = format!(
+                    "Breakpoint {} {} {}",
+                    breakpoint.id,
+                    if *new { "at" } else { "already set at" },
+                    self.bp_location(breakpoint)
+                );
+                if let Some(m) = &breakpoint.message {
+                    let _ = write!(s, " ({m})");
+                }
+                Some(s)
+            }
+            Reply::BreakpointDeleted(id) => Some(format!("Deleted breakpoint {id}")),
+            Reply::Breakpoints(bps) if bps.is_empty() => Some("No breakpoints.".into()),
+            Reply::Breakpoints(bps) => Some(
+                bps.iter()
+                    .map(|bp| {
+                        format!(
+                            "{:<3} {} {}",
+                            bp.id,
+                            self.bp_location(bp),
+                            if bp.verified { "" } else { "(pending)" }
+                        )
+                        .trim_end()
+                        .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Reply::Backtrace { frames, selected } => Some(
+                frames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let marker = if Some(i) == *selected { '>' } else { ' ' };
+                        format!("{marker}#{i:<3} {} at {}", f.name, self.frame_location(f))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Reply::Threads { threads, selected } => Some(
+                threads
+                    .iter()
+                    .map(|t| {
+                        let marker = if Some(t.id) == *selected { '*' } else { ' ' };
+                        format!("{marker} {:<6} {}", t.id, t.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Reply::Frame { index, frame } => {
+                let mut s = format!("#{index} {} at {}", frame.name, self.frame_location(frame));
+                self.frame_with_source(frame, &mut s);
+                Some(s)
+            }
+            Reply::Value(eval, children) => {
+                let mut s = eval.value.clone();
+                if !children.is_empty() {
+                    s.push_str(" {\n");
+                    for v in children {
+                        let _ = writeln!(s, "    {}", variable(v));
+                    }
+                    s.push('}');
+                }
+                Some(s)
+            }
+            Reply::Locals(scopes) => {
+                let multiple = scopes.len() > 1;
+                let mut s = String::new();
+                for scope in scopes {
+                    if multiple {
+                        let _ = writeln!(s, "{}:", scope.scope);
+                    }
+                    if scope.variables.is_empty() {
+                        s.push_str("No locals.\n");
+                    }
+                    for v in &scope.variables {
+                        let _ = writeln!(s, "{}", variable(v));
+                    }
+                }
+                Some(s.trim_end().to_owned())
+            }
+            Reply::Quit => None,
+        }
+    }
+
+    fn bp_location(&self, bp: &Breakpoint) -> String {
+        let loc = bp.resolved.as_ref().unwrap_or(&bp.requested);
+        format!("{}:{}", self.display_path(&loc.path), loc.line)
+    }
+}
+
+fn variable(v: &Variable) -> String {
+    format!("{} = {}", v.name, v.value)
+}
+
+pub fn help(topic: Option<&str>) -> String {
+    if let Some(topic) = topic {
+        return match crate::parser::lookup(topic) {
+            Some(c) => {
+                let aliases = if c.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!("\naliases: {}", c.aliases.join(", "))
+                };
+                format!("{}\n  {}{aliases}", c.usage, c.help)
+            }
+            None => format!("unknown command `{topic}`"),
+        };
+    }
+    let mut s = String::from("Commands:\n");
+    for c in COMMANDS {
+        let aliases = if c.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", c.aliases.join(", "))
+        };
+        let _ = writeln!(s, "  {:<28} {}{aliases}", c.usage, c.help);
+    }
+    s.trim_end().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ddbg_core::frame::FrameId;
+
+    fn frame(path: &Path, line: u32, name: &str) -> StackFrame {
+        StackFrame {
+            id: FrameId(1),
+            name: name.into(),
+            path: Some(path.to_path_buf()),
+            source_name: None,
+            line,
+            column: 1,
+        }
+    }
+
+    #[test]
+    fn breakpoint_stop_shows_header_and_source() {
+        let dir = std::env::temp_dir().join("ddbg-render-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, "fn main() {\n    let x = 1;\n}\n").unwrap();
+
+        let mut r = Renderer::new(dir.clone());
+        let out = r
+            .event(&DebugEvent::SessionStopped(StopInfo {
+                reason: StopReason::Breakpoint(vec![ddbg_core::breakpoint::BreakpointId(1)]),
+                thread: None,
+                description: None,
+                frame: Some(frame(&file, 2, "app::main")),
+            }))
+            .unwrap();
+        assert_eq!(
+            out,
+            "Breakpoint 1, app::main at main.rs:2\n\n2 >     let x = 1;"
+        );
+
+        // stepping within the same function only shows the line
+        let out = r
+            .event(&DebugEvent::SessionStopped(StopInfo {
+                reason: StopReason::Step,
+                thread: None,
+                description: None,
+                frame: Some(frame(&file, 3, "app::main")),
+            }))
+            .unwrap();
+        assert_eq!(out, "3 > }");
+    }
+
+    #[test]
+    fn output_is_line_buffered() {
+        let mut r = Renderer::new(PathBuf::new());
+        assert_eq!(r.output(OutputCategory::Stdout, "hel"), None);
+        assert_eq!(
+            r.output(OutputCategory::Stdout, "lo\nwor"),
+            Some("hello".into())
+        );
+        assert_eq!(
+            r.event(&DebugEvent::SessionExited(0)).unwrap(),
+            "wor\nProcess exited normally."
+        );
+        assert_eq!(r.event(&DebugEvent::SessionTerminated), None);
+    }
+}

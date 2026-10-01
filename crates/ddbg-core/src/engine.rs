@@ -383,7 +383,7 @@ impl Engine {
             self.shutdown().await;
         }
         match self.launch(&target).await {
-            Ok(()) => Ok(Reply::Launched),
+            Ok(()) => Ok(Reply::Launched(target.absolute_program())),
             Err(e) => {
                 self.shutdown().await;
                 Err(e)

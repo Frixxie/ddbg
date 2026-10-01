@@ -222,7 +222,7 @@ async fn start_stopped_at_breakpoint() -> (EngineHandle, Log, broadcast::Receive
     .unwrap();
     assert_eq!(
         e.execute(Command::Run(None)).await.unwrap(),
-        Reply::Launched
+        Reply::Launched("/bin/app".into())
     );
     let ev = wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await;
     let DebugEvent::SessionStopped(info) = ev else {

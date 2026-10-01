@@ -67,7 +67,8 @@ pub enum TestSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Ok,
-    Launched,
+    /// The program was launched under the debugger.
+    Launched(std::path::PathBuf),
     BreakpointSet {
         breakpoint: Breakpoint,
         new: bool,
