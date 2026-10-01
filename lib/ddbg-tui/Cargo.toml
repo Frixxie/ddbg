@@ -7,7 +7,7 @@ edition.workspace = true
 ddbg-core.workspace = true
 ddbg-cli.workspace = true
 anyhow.workspace = true
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 tokio.workspace = true
 syntect.workspace = true
 

@@ -177,13 +177,18 @@ which is not saved between sessions.
 | `f`, Shift-F11 | Step out |
 | `b`, F9 | Toggle breakpoint at the cursor line |
 | `u` / `d` | Frame up / down |
-| Enter | Select the highlighted frame (stack pane) |
+| Enter | Select the highlighted frame (stack pane) or view a variable's value (locals pane) |
 | `.` | Jump to the execution point |
-| Tab | Cycle focus: source, stack, output |
+| Tab | Cycle focus: source, stack, locals, output |
 | `j`/`k`, Up/Down, PageUp/PageDown, `g`/`G` | Move / scroll |
 | `:` | Command line |
 | `?` | Help |
 | `q` | Quit |
+
+In the locals pane, select a variable with Up/Down or `j`/`k` and press
+Enter to view its name, type, and full value supplied by the debugger.
+Long values wrap in the popup; use Up/Down, PageUp/PageDown, or `g`/`G`
+to scroll. Press Esc or Enter to close it.
 
 ### Pickers
 

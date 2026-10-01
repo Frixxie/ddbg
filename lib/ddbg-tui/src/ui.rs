@@ -23,10 +23,11 @@ const KEYS: &[(&str, &str)] = &[
     ("b, F9", "toggle breakpoint at cursor"),
     ("u / d", "frame up / down"),
     ("Enter", "select frame (stack pane)"),
+    ("Enter", "view variable value (locals pane)"),
     (".", "jump to execution point"),
     ("j/k, arrows", "move / scroll"),
     ("g / G", "top / bottom"),
-    ("Tab", "cycle focus: source, stack, log"),
+    ("Tab", "cycle: source, stack, locals, log"),
     ("t", "pick a test to debug or run"),
     ("F", "find functions to break on"),
     (":", "command line (REPL syntax)"),
@@ -57,6 +58,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_breakpoints(f, app, breakpoints);
     draw_log(f, app, log);
     draw_bottom(f, app, bottom);
+    if app.value_scroll.is_some() {
+        draw_value(f, app);
+    }
     if let Some(picker) = &app.picker {
         draw_picker(f, app, picker);
     }
@@ -409,7 +413,10 @@ fn draw_stack(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_locals(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Locals;
     let mut lines = Vec::new();
+    let mut selected = None;
+    let mut variable_index = 0;
     if let Some(ex) = &app.exception {
         let mut text = Vec::new();
         exception_lines(ex, &mut text);
@@ -429,6 +436,10 @@ fn draw_locals(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::styled(scope.scope.clone(), Style::new().bold()));
         }
         for v in &scope.variables {
+            if variable_index == app.locals_cursor {
+                selected = Some(lines.len());
+            }
+            variable_index += 1;
             let mut spans = vec![
                 Span::raw(if multiple { "  " } else { "" }),
                 Span::styled(v.name.clone(), Style::new().fg(Color::Cyan)),
@@ -439,14 +450,58 @@ fn draw_locals(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(Color::DarkGray),
                 ));
             }
-            spans.push(Span::raw(format!(" = {}", v.value)));
+            spans.push(Span::raw(format!(" = {}", v.value.replace('\n', " "))));
             lines.push(Line::from(spans));
         }
     }
-    let p = Paragraph::new(lines)
-        .block(block("locals", false))
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, area);
+    let mut state = ListState::default().with_selected(selected);
+    let list = List::new(lines.into_iter().map(ListItem::new))
+        .block(block(
+            if focused {
+                "locals (Enter: view)"
+            } else {
+                "locals"
+            },
+            focused,
+        ))
+        .highlight_style(if focused {
+            Style::new().reversed()
+        } else {
+            Style::new()
+        });
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_value(f: &mut Frame, app: &mut App) {
+    let Some(variable) = app.selected_local() else {
+        return;
+    };
+    let area = f.area();
+    let rect = centered(area, area.width * 4 / 5, area.height * 4 / 5);
+    let title = match &variable.type_name {
+        Some(t) => format!("{}: {t}", variable.name),
+        None => variable.name.clone(),
+    };
+    let block = block(&title, true);
+    let inner = block.inner(rect);
+    let [value, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let paragraph = Paragraph::new(variable.value.replace('\t', "    ")).wrap(Wrap { trim: false });
+    let max_scroll = paragraph
+        .line_count(value.width)
+        .saturating_sub(value.height as usize)
+        .min(u16::MAX as usize) as u16;
+    let scroll = app.value_scroll.unwrap_or(0).min(max_scroll);
+    app.value_scroll = Some(scroll);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    f.render_widget(paragraph.scroll((scroll, 0)), value);
+    f.render_widget(
+        Line::styled(
+            "↑/↓ scroll  PgUp/PgDn page  g/G top/bottom  Esc close",
+            Style::new().fg(Color::DarkGray),
+        ),
+        hint,
+    );
 }
 
 fn draw_breakpoints(f: &mut Frame, app: &App, area: Rect) {

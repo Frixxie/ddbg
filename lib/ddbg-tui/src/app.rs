@@ -11,6 +11,7 @@ use ddbg_core::breakpoint::{Breakpoint, FunctionLocation, Location, SourceLocati
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::event::ExceptionInfo;
 use ddbg_core::frame::StackFrame;
+use ddbg_core::variable::Variable;
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -26,14 +27,86 @@ const MAX_HISTORY: usize = 200;
 pub enum Focus {
     Source,
     Stack,
+    Locals,
     Log,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ddbg_core::adapter::LldbDapAdapter;
+    use ddbg_core::engine::{self, EngineConfig};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, mpsc};
+
+    #[tokio::test]
+    async fn select_and_inspect_locals_across_scopes() {
+        let cwd = PathBuf::from(".");
+        let engine = engine::spawn(EngineConfig {
+            adapter: Arc::new(LldbDapAdapter::default()),
+            cwd: cwd.clone(),
+            target: None,
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let exec = Executor {
+            session: Arc::new(Mutex::new(ddbg_cli::Session {
+                engine: engine.clone(),
+                cwd: cwd.clone(),
+                candidates: Vec::new(),
+                tests: ddbg_cli::testing::Tests::new(None, ""),
+            })),
+            tx,
+        };
+        let mut app = App::new(exec, engine, cwd, false, Vec::new(), None);
+        let key = |app: &mut App, code| app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.apply_reply(Reply::Locals(
+            (0..2)
+                .map(|i| ScopeVariables {
+                    scope: format!("scope {i}"),
+                    variables: vec![Variable {
+                        name: format!("var{i}"),
+                        value: format!("first line\n{}\nlast line", "long value ".repeat(300)),
+                        type_name: Some("String".into()),
+                        children: None,
+                    }],
+                })
+                .collect(),
+        ));
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Locals);
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_local().unwrap().name, "var1");
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.locals_cursor, 1);
+        key(&mut app, KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let screen = format!("{:?}", terminal.backend().buffer());
+        assert!(screen.contains("var1: String"));
+        assert!(screen.contains("first line"));
+        key(&mut app, KeyCode::Char('G'));
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        assert!(app.value_scroll.unwrap() > 0);
+        assert!(format!("{:?}", terminal.backend().buffer()).contains("last line"));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.value_scroll, None);
+        key(&mut app, KeyCode::Enter);
+        app.debug_event(DebugEvent::SessionContinued);
+        assert_eq!(app.value_scroll, None);
+        assert!(app.selected_local().is_none());
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.value_scroll, None);
+    }
 }
 
 impl Focus {
     fn next(self) -> Self {
         match self {
             Self::Source => Self::Stack,
-            Self::Stack => Self::Log,
+            Self::Stack => Self::Locals,
+            Self::Locals => Self::Log,
             Self::Log => Self::Source,
         }
     }
@@ -82,6 +155,9 @@ pub struct App {
     /// Highlighted row in the stack pane.
     pub stack_cursor: usize,
     pub locals: Vec<ScopeVariables>,
+    pub locals_cursor: usize,
+    /// Scroll offset in the open variable value popup.
+    pub value_scroll: Option<u16>,
     /// Exception the debuggee is stopped on, if any.
     pub exception: Option<ExceptionInfo>,
     pub breakpoints: Vec<Breakpoint>,
@@ -136,6 +212,8 @@ impl App {
             selected_frame: None,
             stack_cursor: 0,
             locals: Vec::new(),
+            locals_cursor: 0,
+            value_scroll: None,
             exception: None,
             breakpoints: Vec::new(),
             log: Vec::new(),
@@ -182,6 +260,8 @@ impl App {
         self.stack.clear();
         self.selected_frame = None;
         self.locals.clear();
+        self.locals_cursor = 0;
+        self.value_scroll = None;
         self.exception = None;
         self.exec_line = None;
     }
@@ -232,7 +312,12 @@ impl App {
                 }
                 self.clear_stopped();
             }
-            DebugEvent::FrameChanged => self.refresh_stopped(),
+            DebugEvent::FrameChanged => {
+                self.locals.clear();
+                self.locals_cursor = 0;
+                self.value_scroll = None;
+                self.refresh_stopped();
+            }
             DebugEvent::BreakpointChanged(_) => self.refresh_breakpoints(),
             DebugEvent::ThreadsChanged | DebugEvent::Output(_) => {}
         }
@@ -281,7 +366,11 @@ impl App {
                 self.show_frame(&frame);
                 self.execute_silent(Command::Locals);
             }
-            Reply::Locals(scopes) => self.locals = scopes,
+            Reply::Locals(scopes) => {
+                self.locals = scopes;
+                self.locals_cursor = self.locals_cursor.min(self.locals_len().saturating_sub(1));
+                self.value_scroll = None;
+            }
             Reply::Breakpoints(bps) => self.breakpoints = bps,
             Reply::BreakpointSet { .. } | Reply::BreakpointDeleted(_) => self.refresh_breakpoints(),
             _ => {}
@@ -359,6 +448,17 @@ impl App {
             .map_or(1, |l| l.len().max(1) as u32)
     }
 
+    fn locals_len(&self) -> usize {
+        self.locals.iter().map(|s| s.variables.len()).sum()
+    }
+
+    pub fn selected_local(&self) -> Option<&Variable> {
+        self.locals
+            .iter()
+            .flat_map(|s| &s.variables)
+            .nth(self.locals_cursor)
+    }
+
     fn move_cursor(&mut self, delta: i64) {
         match self.focus {
             Focus::Source => {
@@ -368,6 +468,10 @@ impl App {
             Focus::Stack => {
                 let max = self.stack.len().saturating_sub(1) as i64;
                 self.stack_cursor = (self.stack_cursor as i64 + delta).clamp(0, max) as usize;
+            }
+            Focus::Locals => {
+                let max = self.locals_len().saturating_sub(1) as i64;
+                self.locals_cursor = (self.locals_cursor as i64 + delta).clamp(0, max) as usize;
             }
             Focus::Log => {
                 let max = self.log.len().saturating_sub(1) as i64;
@@ -399,6 +503,19 @@ impl App {
         }
         if self.functions.is_some() {
             self.function_key(key);
+            return;
+        }
+        if let Some(scroll) = &mut self.value_scroll {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.value_scroll = None,
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(20),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(20),
+                KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => *scroll = u16::MAX,
+                _ => {}
+            }
             return;
         }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -438,6 +555,9 @@ impl App {
             KeyCode::Char('G') => self.move_cursor(i64::MAX / 2),
             KeyCode::Enter if self.focus == Focus::Stack && !self.stack.is_empty() => {
                 self.execute(Command::Frame(FrameSelector::Index(self.stack_cursor)));
+            }
+            KeyCode::Enter if self.focus == Focus::Locals && self.selected_local().is_some() => {
+                self.value_scroll = Some(0);
             }
             KeyCode::Char('.') => {
                 // Jump back to the execution point.
