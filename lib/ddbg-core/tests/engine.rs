@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ddbg_core::adapter::LldbDapAdapter;
-use ddbg_core::breakpoint::{BreakpointId, SourceLocation};
+use ddbg_core::breakpoint::{BreakpointId, FunctionLocation, SourceLocation};
 use ddbg_core::command::{Command, FrameSelector, Location, Reply};
 use ddbg_core::engine::{Connection, EngineConfig, spawn_with_connector};
 use ddbg_core::session::StopReason;
@@ -73,7 +73,7 @@ impl Fake {
                 "initialize" => {
                     self.respond(
                         &req,
-                        json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true}),
+                        json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true}),
                     )
                     .await
                 }
@@ -89,6 +89,18 @@ impl Fake {
                         .map(|b| {
                             self.bp_id += 1;
                             json!({"id": self.bp_id, "verified": true, "line": b["line"]})
+                        })
+                        .collect();
+                    self.respond(&req, json!({ "breakpoints": bps })).await;
+                }
+                "setFunctionBreakpoints" => {
+                    let bps: Vec<Value> = args["breakpoints"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|_| {
+                            self.bp_id += 1;
+                            json!({"id": self.bp_id, "verified": true, "line": 5, "source": {"path": "/src/main.rs"}})
                         })
                         .collect();
                     self.respond(&req, json!({ "breakpoints": bps })).await;
@@ -358,4 +370,63 @@ async fn breakpoint_added_while_stopped_resends_whole_file() {
     assert!(breakpoint.verified);
     assert_eq!(requests(&log, "setBreakpoints"), 2);
     e.execute(Command::Quit).await.unwrap();
+}
+
+fn function_bp(name: &str, file: Option<&str>) -> Command {
+    Command::Break(Location::Function(FunctionLocation::new(
+        name,
+        file.map(PathBuf::from),
+    )))
+}
+
+#[tokio::test]
+async fn function_breakpoint_in_scope_stops() {
+    let (e, log) = engine();
+    let mut rx = e.subscribe();
+    e.execute(function_bp("main", Some("src/main.rs")))
+        .await
+        .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(info.reason, StopReason::Breakpoint(vec![BreakpointId(1)]));
+    assert_eq!(requests(&log, "setFunctionBreakpoints"), 1);
+    assert_eq!(requests(&log, "setBreakpoints"), 0);
+
+    let Reply::Breakpoints(bps) = e.execute(Command::Breakpoints).await.unwrap() else {
+        panic!()
+    };
+    assert!(bps[0].verified);
+    assert_eq!(bps[0].message, None);
+
+    // Adding another function breakpoint re-sends the whole set.
+    e.execute(function_bp("helper", None)).await.unwrap();
+    assert_eq!(requests(&log, "setFunctionBreakpoints"), 2);
+    e.execute(Command::DeleteBreakpoint(BreakpointId(2)))
+        .await
+        .unwrap();
+    assert_eq!(requests(&log, "setFunctionBreakpoints"), 3);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn function_breakpoint_out_of_scope_is_skipped() {
+    let (e, log) = engine();
+    let mut rx = e.subscribe();
+    e.execute(function_bp("main", Some("other.rs")))
+        .await
+        .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    let ev = wait_for(&mut rx, |e| {
+        matches!(
+            e,
+            DebugEvent::SessionStopped(_) | DebugEvent::SessionTerminated
+        )
+    })
+    .await;
+    assert!(matches!(ev, DebugEvent::SessionTerminated), "got {ev:?}");
+    assert_eq!(requests(&log, "continue"), 1);
 }

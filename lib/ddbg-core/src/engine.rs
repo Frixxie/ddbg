@@ -20,11 +20,11 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::adapter::DebugAdapter;
-use crate::breakpoint::BreakpointId;
+use crate::breakpoint::{Breakpoint, BreakpointId};
 use crate::command::{Command, FrameSelector, Location, Reply, ScopeVariables};
 use anyhow::{Result, anyhow, bail};
 
-use crate::error::{NO_TARGET, NO_THREAD, NOT_RUNNING, NOT_STOPPED};
+use crate::error::{NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING, NOT_STOPPED};
 use crate::event::{DebugEvent, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
 use crate::target::{DebugTarget, LaunchTarget};
@@ -234,18 +234,18 @@ impl Engine {
                 self.mark_resumed(false);
                 Ok(Reply::Ok)
             }
-            Command::Break(Location::Source(loc)) => {
+            Command::Break(loc) => {
+                let is_function = matches!(loc, Location::Function(_));
+                if is_function
+                    && self.conn.is_some()
+                    && !self.session.supports(Feature::FunctionBreakpoints)
+                {
+                    bail!(NO_FUNCTION_BREAKPOINTS);
+                }
                 let (id, new) = self.session.breakpoints.add(loc, &self.cwd);
-                let path = self
-                    .session
-                    .breakpoints
-                    .get(id)
-                    .unwrap()
-                    .requested
-                    .path
-                    .clone();
-                if self.can_set_breakpoints() {
-                    self.sync_breakpoints(&path).await?;
+                if new && self.can_set_breakpoints() {
+                    let bp = self.session.breakpoints.get(id).unwrap().clone();
+                    self.sync_for(&bp).await?;
                 }
                 let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
                 Ok(Reply::BreakpointSet { breakpoint, new })
@@ -257,7 +257,7 @@ impl Engine {
                     .remove(id)
                     .ok_or_else(|| anyhow!("no breakpoint {id}"))?;
                 if self.can_set_breakpoints() {
-                    self.sync_breakpoints(&bp.requested.path).await?;
+                    self.sync_for(&bp).await?;
                 }
                 Ok(Reply::BreakpointDeleted(id))
             }
@@ -433,6 +433,9 @@ impl Engine {
         for file in self.session.breakpoints.files() {
             self.sync_breakpoints(&file).await?;
         }
+        if self.session.breakpoints.has_functions() {
+            self.sync_function_breakpoints().await?;
+        }
         if self.session.supports(Feature::ConfigurationDone) {
             client.request(ConfigurationDoneArguments {}).await?;
         }
@@ -454,6 +457,29 @@ impl Engine {
         self.session
             .breakpoints
             .apply_results(path, &resp.breakpoints);
+        Ok(())
+    }
+
+    /// Re-send whichever breakpoint set `bp` belongs to.
+    async fn sync_for(&mut self, bp: &Breakpoint) -> Result<()> {
+        match &bp.requested {
+            Location::Source(s) => self.sync_breakpoints(&s.path).await,
+            Location::Function(_) => self.sync_function_breakpoints().await,
+        }
+    }
+
+    async fn sync_function_breakpoints(&mut self) -> Result<()> {
+        if !self.session.supports(Feature::FunctionBreakpoints) {
+            self.session
+                .breakpoints
+                .reject_functions(NO_FUNCTION_BREAKPOINTS);
+            return Ok(());
+        }
+        let args = self.session.breakpoints.function_request();
+        let resp = self.client()?.request(args).await?;
+        self.session
+            .breakpoints
+            .apply_function_results(&resp.breakpoints);
         Ok(())
     }
 
@@ -647,12 +673,21 @@ impl Engine {
     }
 
     async fn on_stopped(&mut self, s: dap::StoppedEvent) -> Result<()> {
-        let hit: Vec<BreakpointId> = s
+        let hit_bps: Vec<Breakpoint> = s
             .hit_breakpoint_ids
             .iter()
             .filter_map(|id| self.session.breakpoints.by_adapter_id(*id))
-            .map(|b| b.id)
+            .cloned()
             .collect();
+        if s.reason == "breakpoint"
+            && !hit_bps.is_empty()
+            && hit_bps.iter().all(|b| b.scope().is_some())
+            && let Some(tid) = s.thread_id
+            && self.skip_out_of_scope(tid, &hit_bps).await?
+        {
+            return Ok(());
+        }
+        let hit: Vec<BreakpointId> = hit_bps.iter().map(|b| b.id).collect();
         let reason = StopReason::from_dap(&s.reason, s.text.clone(), hit);
         self.session.on_resume();
         self.session.status = SessionStatus::Stopped(reason.clone());
@@ -678,6 +713,36 @@ impl Engine {
             frame: self.session.stack.first().cloned(),
         }));
         Ok(())
+    }
+
+    /// Scoped function breakpoints: DAP matches by name only, so a stop in
+    /// a same-named function of another file is resumed transparently.
+    /// Returns `true` if execution was resumed.
+    async fn skip_out_of_scope(&mut self, tid: i64, hit: &[Breakpoint]) -> Result<bool> {
+        let resp = self
+            .client()?
+            .request(StackTraceArguments {
+                thread_id: tid,
+                start_frame: None,
+                levels: Some(1),
+            })
+            .await?;
+        let path = resp
+            .stack_frames
+            .first()
+            .and_then(|f| f.source.as_ref())
+            .and_then(|s| s.path.as_deref())
+            .map(Path::new);
+        if hit.iter().any(|b| b.in_scope(path)) {
+            return Ok(false);
+        }
+        tracing::debug!("skipping stop outside breakpoint file scope: {path:?}");
+        self.client()?
+            .request(ContinueArguments { thread_id: tid })
+            .await?;
+        self.session.on_resume();
+        self.session.status = SessionStatus::Running;
+        Ok(true)
     }
 
     /// Disconnect from the adapter (terminating the debuggee) and reset state.

@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use ddbg_core::DebugEvent;
-use ddbg_core::breakpoint::Breakpoint;
+use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation};
 use ddbg_core::command::{Command, Reply};
 use ddbg_core::event::{OutputCategory, StopInfo};
 use ddbg_core::frame::StackFrame;
@@ -304,8 +304,13 @@ impl Renderer {
     }
 
     fn bp_location(&self, bp: &Breakpoint) -> String {
-        let loc = bp.resolved.as_ref().unwrap_or(&bp.requested);
-        format!("{}:{}", self.display_path(&loc.path), loc.line)
+        let line = |loc: &SourceLocation| format!("{}:{}", self.display_path(&loc.path), loc.line);
+        match (&bp.requested, &bp.resolved) {
+            (_, Some(resolved)) if !bp.is_function() => line(resolved),
+            (Location::Source(requested), _) => line(requested),
+            (Location::Function(f), Some(resolved)) => format!("{f} ({})", line(resolved)),
+            (Location::Function(f), None) => f.to_string(),
+        }
     }
 }
 

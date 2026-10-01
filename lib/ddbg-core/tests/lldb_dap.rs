@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ddbg_core::adapter::LldbDapAdapter;
-use ddbg_core::breakpoint::{BreakpointId, SourceLocation};
+use ddbg_core::breakpoint::{BreakpointId, FunctionLocation, SourceLocation};
 use ddbg_core::command::{Command, Location, Reply};
 use ddbg_core::engine::{self, EngineConfig};
 use ddbg_core::session::StopReason;
@@ -122,4 +122,47 @@ async fn debug_rust_executable() {
     wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionExited(0))).await;
     wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionTerminated)).await;
     e.execute(Command::Quit).await.unwrap();
+}
+
+async fn run_with_function_breakpoint(file: Option<&str>) -> DebugEvent {
+    let program = build_fixture();
+    let dir = fixture().canonicalize().unwrap();
+    let mut target = LaunchTarget::new(&program, vec![]);
+    target.cwd = dir.clone();
+    let e = engine::spawn(EngineConfig {
+        adapter: Arc::new(LldbDapAdapter::for_rust()),
+        cwd: dir,
+        target: Some(target),
+    });
+    let mut rx = e.subscribe();
+    e.execute(Command::Break(Location::Function(FunctionLocation::new(
+        "add",
+        file.map(Into::into),
+    ))))
+    .await
+    .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    let ev = wait_for(&mut rx, |e| {
+        matches!(
+            e,
+            DebugEvent::SessionStopped(_) | DebugEvent::SessionTerminated
+        )
+    })
+    .await;
+    e.execute(Command::Quit).await.unwrap();
+    ev
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires lldb-dap"]
+async fn function_breakpoint_scoped_to_file() {
+    let DebugEvent::SessionStopped(info) = run_with_function_breakpoint(Some("src/main.rs")).await
+    else {
+        panic!("expected a stop in `add`")
+    };
+    assert_eq!(info.reason, StopReason::Breakpoint(vec![BreakpointId(1)]));
+    assert!(info.frame.unwrap().name.contains("add"));
+
+    let ev = run_with_function_breakpoint(Some("other.rs")).await;
+    assert!(matches!(ev, DebugEvent::SessionTerminated), "{ev:?}");
 }

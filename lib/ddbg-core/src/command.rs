@@ -1,6 +1,7 @@
 //! Frontend-independent command model. Aliases live only in frontends.
 
-use crate::breakpoint::{Breakpoint, BreakpointId, SourceLocation};
+use crate::breakpoint::{Breakpoint, BreakpointId};
+pub use crate::breakpoint::{FunctionLocation, Location};
 use crate::frame::StackFrame;
 use crate::target::LaunchTarget;
 use crate::thread::{Thread, ThreadId};
@@ -35,11 +36,6 @@ pub enum Command {
     TestDebug(TestSelector),
 
     Quit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Location {
-    Source(SourceLocation),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

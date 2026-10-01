@@ -2,7 +2,12 @@
 //!
 //! ddbg owns the *desired* breakpoints; the adapter owns the actual ones.
 //! DAP `setBreakpoints` replaces all breakpoints of a source, so the store
-//! is organized to hand out the full set per file.
+//! is organized to hand out the full set per file. Likewise,
+//! `setFunctionBreakpoints` replaces all function breakpoints at once.
+//!
+//! DAP function breakpoints are name-only. A function breakpoint may carry
+//! a `file` scope; ddbg enforces it itself by skipping stops whose top frame
+//! lies outside that file (see [`Breakpoint::in_scope`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,15 +45,86 @@ impl fmt::Display for SourceLocation {
     }
 }
 
+/// A function breakpoint, optionally restricted to one source file.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionLocation {
+    pub name: String,
+    /// File scope as written by the user, matched as a path suffix.
+    pub file: Option<PathBuf>,
+}
+
+impl FunctionLocation {
+    pub fn new(name: impl Into<String>, file: Option<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            file,
+        }
+    }
+}
+
+impl fmt::Display for FunctionLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.file {
+            Some(file) => write!(f, "{}:{}", file.display(), self.name),
+            None => f.write_str(&self.name),
+        }
+    }
+}
+
+/// Where the user asked to stop.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Location {
+    Source(SourceLocation),
+    Function(FunctionLocation),
+}
+
+impl fmt::Display for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Location::Source(s) => s.fmt(f),
+            Location::Function(func) => func.fmt(f),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
     pub id: BreakpointId,
-    pub requested: SourceLocation,
+    pub requested: Location,
     pub resolved: Option<SourceLocation>,
     pub verified: bool,
     pub message: Option<String>,
     /// Adapter-assigned id, used to match `breakpoint` events.
     pub adapter_id: Option<i64>,
+}
+
+impl Breakpoint {
+    pub fn is_function(&self) -> bool {
+        matches!(self.requested, Location::Function(_))
+    }
+
+    /// The file scope of a scoped function breakpoint.
+    pub fn scope(&self) -> Option<&Path> {
+        match &self.requested {
+            Location::Function(f) => f.file.as_deref(),
+            Location::Source(_) => None,
+        }
+    }
+
+    /// Whether a stop at `path` satisfies this breakpoint's file scope.
+    /// Unscoped breakpoints accept any location.
+    pub fn in_scope(&self, path: Option<&Path>) -> bool {
+        match self.scope() {
+            None => true,
+            Some(scope) => path.is_some_and(|p| path_matches(p, scope)),
+        }
+    }
+}
+
+/// `scope` matches `path` if it is a component-wise suffix of it,
+/// so `main.rs` and `src/main.rs` both match `/proj/src/main.rs`.
+pub fn path_matches(path: &Path, scope: &Path) -> bool {
+    path.ends_with(scope)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -60,8 +136,11 @@ pub struct BreakpointStore {
 impl BreakpointStore {
     /// Add a breakpoint. Relative paths are resolved against `base`.
     /// Returns the existing id if an identical breakpoint already exists.
-    pub fn add(&mut self, mut location: SourceLocation, base: &Path) -> (BreakpointId, bool) {
-        location.path = normalize(&location.path, base);
+    /// Function breakpoint file scopes are kept as written (suffix match).
+    pub fn add(&mut self, mut location: Location, base: &Path) -> (BreakpointId, bool) {
+        if let Location::Source(src) = &mut location {
+            src.path = normalize(&src.path, base);
+        }
         if let Some(bp) = self.items.values().find(|b| b.requested == location) {
             return (bp.id, false);
         }
@@ -102,7 +181,10 @@ impl BreakpointStore {
         let mut files: Vec<_> = self
             .items
             .values()
-            .map(|b| b.requested.path.clone())
+            .filter_map(|b| match &b.requested {
+                Location::Source(s) => Some(s.path.clone()),
+                Location::Function(_) => None,
+            })
             .collect();
         files.sort();
         files.dedup();
@@ -113,8 +195,54 @@ impl BreakpointStore {
     pub fn for_file(&self, path: &Path) -> Vec<&Breakpoint> {
         self.items
             .values()
-            .filter(|b| b.requested.path == path)
+            .filter(|b| matches!(&b.requested, Location::Source(s) if s.path == path))
             .collect()
+    }
+
+    /// All function breakpoints, in the order sent to the adapter.
+    pub fn functions(&self) -> Vec<&Breakpoint> {
+        self.items.values().filter(|b| b.is_function()).collect()
+    }
+
+    pub fn has_functions(&self) -> bool {
+        self.items.values().any(|b| b.is_function())
+    }
+
+    /// Build the complete `setFunctionBreakpoints` request.
+    pub fn function_request(&self) -> dap::SetFunctionBreakpointsArguments {
+        dap::SetFunctionBreakpointsArguments {
+            breakpoints: self
+                .functions()
+                .into_iter()
+                .filter_map(|b| match &b.requested {
+                    Location::Function(f) => Some(dap::FunctionBreakpoint {
+                        name: f.name.clone(),
+                        condition: None,
+                    }),
+                    Location::Source(_) => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Apply a `setFunctionBreakpoints` response. Results are positional.
+    pub fn apply_function_results(&mut self, results: &[dap::Breakpoint]) {
+        let ids: Vec<_> = self.functions().iter().map(|b| b.id).collect();
+        for (id, result) in ids.into_iter().zip(results) {
+            if let Some(bp) = self.items.get_mut(&id) {
+                update(bp, result);
+            }
+        }
+    }
+
+    /// Mark all function breakpoints as unsupported by the adapter.
+    pub fn reject_functions(&mut self, message: &str) {
+        for bp in self.items.values_mut().filter(|b| b.is_function()) {
+            bp.verified = false;
+            bp.resolved = None;
+            bp.adapter_id = None;
+            bp.message = Some(message.to_owned());
+        }
     }
 
     /// Build the complete `setBreakpoints` request for a file.
@@ -128,10 +256,13 @@ impl BreakpointStore {
             breakpoints: self
                 .for_file(path)
                 .into_iter()
-                .map(|b| dap::SourceBreakpoint {
-                    line: b.requested.line.into(),
-                    column: None,
-                    condition: None,
+                .filter_map(|b| match &b.requested {
+                    Location::Source(s) => Some(dap::SourceBreakpoint {
+                        line: s.line.into(),
+                        column: None,
+                        condition: None,
+                    }),
+                    Location::Function(_) => None,
                 })
                 .collect(),
         }
@@ -182,14 +313,26 @@ fn update(bp: &mut Breakpoint, result: &dap::Breakpoint) {
     if result.id.is_some() {
         bp.adapter_id = result.id;
     }
-    if let Some(line) = result.line {
-        let path = result
-            .source
-            .as_ref()
-            .and_then(|s| s.path.as_ref())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| bp.requested.path.clone());
+    let path = result
+        .source
+        .as_ref()
+        .and_then(|s| s.path.as_ref())
+        .map(PathBuf::from)
+        .or_else(|| match &bp.requested {
+            Location::Source(s) => Some(s.path.clone()),
+            Location::Function(_) => None,
+        });
+    if let (Some(line), Some(path)) = (result.line, path) {
         bp.resolved = Some(SourceLocation::new(path, line.max(0) as u32));
+    }
+    if let (Some(scope), Some(resolved)) = (bp.scope(), &bp.resolved)
+        && !path_matches(&resolved.path, scope)
+        && bp.message.is_none()
+    {
+        bp.message = Some(format!(
+            "resolved outside {}; stops elsewhere are skipped",
+            scope.display()
+        ));
     }
 }
 
@@ -206,11 +349,72 @@ fn normalize(path: &Path, base: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn src(path: &str, line: u32) -> Location {
+        Location::Source(SourceLocation::new(path, line))
+    }
+
+    fn func(name: &str, file: Option<&str>) -> Location {
+        Location::Function(FunctionLocation::new(name, file.map(PathBuf::from)))
+    }
+
+    fn resolved(id: i64, path: &str, line: i64) -> dap::Breakpoint {
+        dap::Breakpoint {
+            id: Some(id),
+            verified: true,
+            message: None,
+            source: Some(dap::Source {
+                name: None,
+                path: Some(path.into()),
+                source_reference: None,
+            }),
+            line: Some(line),
+            column: None,
+        }
+    }
+
+    #[test]
+    fn function_breakpoints_are_sent_together_and_not_per_file() {
+        let mut s = store();
+        s.add(func("main", None), Path::new("/"));
+        s.add(func("parse", Some("src/b.rs")), Path::new("/"));
+        let names: Vec<_> = s
+            .function_request()
+            .breakpoints
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        assert_eq!(names, ["main", "parse"]);
+        assert_eq!(s.files().len(), 2);
+        assert_eq!(s.request_for(Path::new("/src/a.rs")).breakpoints.len(), 2);
+        // scope is kept as written, and duplicates are detected
+        assert!(!s.add(func("parse", Some("src/b.rs")), Path::new("/x")).1);
+    }
+
+    #[test]
+    fn scoped_function_breakpoints_check_paths() {
+        let mut s = BreakpointStore::default();
+        let (scoped, _) = s.add(func("parse", Some("src/b.rs")), Path::new("/"));
+        let (free, _) = s.add(func("main", None), Path::new("/"));
+        s.apply_function_results(&[resolved(7, "/p/src/a.rs", 3), resolved(8, "/p/m.rs", 1)]);
+
+        let bp = s.get(scoped).unwrap();
+        assert!(bp.in_scope(Some(Path::new("/p/src/b.rs"))));
+        assert!(!bp.in_scope(Some(Path::new("/p/src/a.rs"))));
+        assert!(!bp.in_scope(Some(Path::new("/p/xsrc/b.rs"))));
+        assert!(!bp.in_scope(None));
+        assert!(bp.message.as_deref().unwrap().contains("outside src/b.rs"));
+
+        let bp = s.get(free).unwrap();
+        assert!(bp.in_scope(None));
+        assert_eq!(bp.message, None);
+        assert_eq!(bp.resolved, Some(SourceLocation::new("/p/m.rs", 1)));
+    }
+
     fn store() -> BreakpointStore {
         let mut s = BreakpointStore::default();
-        s.add(SourceLocation::new("/src/a.rs", 10), Path::new("/"));
-        s.add(SourceLocation::new("/src/b.rs", 5), Path::new("/"));
-        s.add(SourceLocation::new("/src/a.rs", 20), Path::new("/"));
+        s.add(src("/src/a.rs", 10), Path::new("/"));
+        s.add(src("/src/b.rs", 5), Path::new("/"));
+        s.add(src("/src/a.rs", 20), Path::new("/"));
         s
     }
 
@@ -225,7 +429,7 @@ mod tests {
     #[test]
     fn duplicate_add_returns_existing() {
         let mut s = store();
-        let (id, new) = s.add(SourceLocation::new("/src/a.rs", 10), Path::new("/"));
+        let (id, new) = s.add(src("/src/a.rs", 10), Path::new("/"));
         assert_eq!(id, BreakpointId(1));
         assert!(!new);
     }
@@ -233,11 +437,8 @@ mod tests {
     #[test]
     fn relative_paths_are_resolved() {
         let mut s = BreakpointStore::default();
-        let (id, _) = s.add(SourceLocation::new("src/x.rs", 1), Path::new("/proj"));
-        assert_eq!(
-            s.get(id).unwrap().requested.path,
-            Path::new("/proj/src/x.rs")
-        );
+        let (id, _) = s.add(src("src/x.rs", 1), Path::new("/proj"));
+        assert_eq!(s.get(id).unwrap().requested, src("/proj/src/x.rs", 1));
     }
 
     #[test]

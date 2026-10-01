@@ -185,7 +185,6 @@ The first version will not attempt to provide:
 - core dump analysis;
 - advanced exception configuration;
 - data breakpoints;
-- function breakpoints;
 - conditional breakpoints;
 - multi-process debugging;
 - remote debugging;
@@ -1042,7 +1041,7 @@ DAP adapters own the actual debugger breakpoints.
 ```rust
 struct Breakpoint {
     id: BreakpointId,
-    requested: SourceLocation,
+    requested: Location, // Source(file:line) | Function { name, file }
     resolved: Option<SourceLocation>,
     verified: bool,
 }
@@ -1066,6 +1065,23 @@ setBreakpoints(foo.rs, [...])
 ```
 
 rather than sending only the newly added breakpoint.
+
+## Function breakpoints
+
+```console
+break parse              # any function named `parse`
+break src/lib.rs:parse   # only `parse` in a file ending with src/lib.rs
+```
+
+The text after the last single `:` is a line if it is numeric, otherwise a
+function name (`::` is part of the name, e.g. `lib.rs:Parser::new`).
+
+DAP `setFunctionBreakpoints` replaces *all* function breakpoints, so the whole
+set is re-sent on every change. Function breakpoints are name-only in DAP, so
+the file scope is enforced by ddbg: when a stop is caused only by scoped
+function breakpoints and the top frame's source path does not end with any of
+their files, ddbg resumes immediately without reporting the stop. A breakpoint
+whose resolved location is outside its file is annotated with a message.
 
 ---
 

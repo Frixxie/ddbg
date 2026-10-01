@@ -272,6 +272,30 @@ request!(
     SetBreakpointsResponse
 );
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionBreakpoint {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+}
+
+/// Replaces *all* function breakpoints of the session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFunctionBreakpointsArguments {
+    pub breakpoints: Vec<FunctionBreakpoint>,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetFunctionBreakpointsResponse {
+    pub breakpoints: Vec<Breakpoint>,
+}
+request!(
+    SetFunctionBreakpointsArguments,
+    "setFunctionBreakpoints",
+    SetFunctionBreakpointsResponse
+);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigurationDoneArguments {}
 request!(ConfigurationDoneArguments, "configurationDone", Empty);

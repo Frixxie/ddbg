@@ -91,7 +91,8 @@ Process exited normally.
 | `next` | `n` | Step over |
 | `step` | `s` | Step into |
 | `finish` | `fin` | Step out |
-| `break <file>:<line>` | `b` | Set a breakpoint |
+| `break <file>:<line>` | `b` | Set a breakpoint at a line |
+| `break [<file>:]<function>` | `b` | Set a function breakpoint, optionally only in `<file>` |
 | `delete <id>` | `d` | Delete a breakpoint |
 | `breakpoints` | | List breakpoints |
 | `backtrace` | `bt` | Show the call stack |

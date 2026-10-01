@@ -1,7 +1,7 @@
 //! Text → [`Command`] parsing. Aliases exist only here.
 
 use ddbg_core::LaunchTarget;
-use ddbg_core::breakpoint::{BreakpointId, SourceLocation};
+use ddbg_core::breakpoint::{BreakpointId, FunctionLocation, SourceLocation};
 use ddbg_core::command::{Command, FrameSelector, Location, TestQuery, TestSelector};
 use ddbg_core::thread::ThreadId;
 
@@ -43,7 +43,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         "finish",
         "Step out of the current function",
     ),
-    spec("break", &["b"], "break <file>:<line>", "Set a breakpoint"),
+    spec(
+        "break",
+        &["b"],
+        "break <file>:<line> | [<file>:]<function>",
+        "Set a breakpoint at a line or function",
+    ),
     spec(
         "delete",
         &["d"],
@@ -152,7 +157,7 @@ pub fn parse(line: &str) -> Result<Input, String> {
         "finish" => no_args(Command::Finish),
         "break" => {
             let loc = parse_location(rest).ok_or_else(usage)?;
-            Ok(Input::Command(Command::Break(Location::Source(loc))))
+            Ok(Input::Command(Command::Break(loc)))
         }
         "delete" => {
             let id = rest.parse().map_err(|_| usage())?;
@@ -197,12 +202,39 @@ pub fn parse(line: &str) -> Result<Input, String> {
     }
 }
 
-/// `file:line`. Splits at the last colon so Windows drive letters work.
-fn parse_location(s: &str) -> Option<SourceLocation> {
-    let (file, line) = s.rsplit_once(':')?;
-    let line: u32 = line.trim().parse().ok().filter(|l| *l > 0)?;
-    let file = file.trim();
-    (!file.is_empty()).then(|| SourceLocation::new(file, line))
+/// `file:line`, `file:function` or `function`.
+///
+/// Splits at the last single colon, so Windows drive letters and `::` in
+/// qualified names (`file.rs:mod::func`, `ns::func`) work.
+fn parse_location(s: &str) -> Option<Location> {
+    let s = s.trim();
+    let (file, rest) = match split_location(s) {
+        Some((file, rest)) => (Some(file.trim()), rest.trim()),
+        None => (None, s),
+    };
+    if file.is_some_and(str::is_empty) || rest.is_empty() {
+        return None;
+    }
+    if rest.bytes().all(|b| b.is_ascii_digit()) {
+        let line: u32 = rest.parse().ok().filter(|l| *l > 0)?;
+        return Some(Location::Source(SourceLocation::new(file?, line)));
+    }
+    if rest.contains(['/', '\\']) || rest.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(Location::Function(FunctionLocation::new(
+        rest,
+        file.map(Into::into),
+    )))
+}
+
+/// Split at the last `:` that is not part of `::`.
+fn split_location(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    (0..b.len())
+        .rev()
+        .find(|&i| b[i] == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':'))
+        .map(|i| (&s[..i], &s[i + 1..]))
 }
 
 fn parse_test_selector(s: &str) -> Option<TestSelector> {
@@ -289,9 +321,38 @@ mod tests {
             cmd("break C:\\src\\a.cs:7"),
             Command::Break(Location::Source(SourceLocation::new("C:\\src\\a.cs", 7)))
         );
-        assert!(parse("b foo.rs").is_err());
+        assert!(parse("b src/foo.rs").is_err());
         assert!(parse("b foo.rs:0").is_err());
+        assert!(parse("b foo.rs:").is_err());
+        assert!(parse("b :main").is_err());
+        assert!(parse("b").is_err());
         assert_eq!(cmd("delete 3"), Command::DeleteBreakpoint(BreakpointId(3)));
+    }
+
+    fn func(name: &str, file: Option<&str>) -> Command {
+        Command::Break(Location::Function(FunctionLocation::new(
+            name,
+            file.map(Into::into),
+        )))
+    }
+
+    #[test]
+    fn parses_function_breakpoints() {
+        assert_eq!(cmd("b main"), func("main", None));
+        assert_eq!(
+            cmd("b app::parser::parse"),
+            func("app::parser::parse", None)
+        );
+        assert_eq!(cmd("b src/main.rs:run"), func("run", Some("src/main.rs")));
+        assert_eq!(
+            cmd("break src/lib.rs:Parser::new"),
+            func("Parser::new", Some("src/lib.rs"))
+        );
+        assert_eq!(
+            cmd("b C:\\src\\a.cs:App.Program.Main"),
+            func("App.Program.Main", Some("C:\\src\\a.cs"))
+        );
+        assert_eq!(cmd("b Foo.cs:Bar"), func("Bar", Some("Foo.cs")));
     }
 
     #[test]
