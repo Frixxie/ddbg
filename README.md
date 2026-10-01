@@ -120,6 +120,8 @@ ddbg> break src/parser.rs:42
 ddbg> test-debug 2
 ```
 
+`test-debug -b <test>` (or `--break`) also sets a breakpoint at the start of the test.
+
 .NET support covers xUnit v3 test projects on Microsoft.Testing.Platform
 (`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`).
 Running a single row of a `[Theory]` runs all of that method's rows. Other

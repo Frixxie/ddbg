@@ -4,7 +4,8 @@
 use std::fmt::Write;
 
 use anyhow::{anyhow, bail};
-use ddbg_core::command::{TestQuery as QueryCmd, TestSelector};
+use ddbg_core::breakpoint::SourceLocation;
+use ddbg_core::command::{FunctionLocation, Location, TestQuery as QueryCmd, TestSelector};
 use ddbg_core::{DebugTarget, LaunchTarget};
 use ddbg_test::{AnyProvider, TestCase, TestOutcome, TestProvider, TestQuery, TestRunResult};
 
@@ -48,11 +49,15 @@ impl Tests {
         Ok(render_run(&result))
     }
 
-    /// `test-debug <test>`: the launch target for the engine.
-    pub async fn debug_target(&mut self, sel: &TestSelector) -> anyhow::Result<LaunchTarget> {
+    /// `test-debug <test>`: the launch target for the engine, plus the
+    /// location of the start of the test (for `test-debug -b`).
+    pub async fn debug_target(
+        &mut self,
+        sel: &TestSelector,
+    ) -> anyhow::Result<(LaunchTarget, Location)> {
         let test = self.select(sel).await?;
         match self.provider()?.debug_target(&test.id).await? {
-            DebugTarget::Launch(t) => Ok(t),
+            DebugTarget::Launch(t) => Ok((t, start_location(&test))),
             DebugTarget::Attach(_) => bail!("attach targets are not supported yet"),
         }
     }
@@ -70,6 +75,14 @@ impl Tests {
                 picked
             }
         }
+    }
+}
+
+/// Where a test starts: its source line when known, else its function.
+fn start_location(test: &TestCase) -> Location {
+    match (&test.source, test.line) {
+        (Some(file), Some(line)) => Location::Source(SourceLocation::new(file, line)),
+        _ => Location::Function(FunctionLocation::new(test.name.as_str(), None)),
     }
 }
 

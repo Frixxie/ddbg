@@ -89,8 +89,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     spec(
         "test-debug",
         &["td"],
-        "test-debug <test>",
-        "Debug a test by number or name",
+        "test-debug [-b|--break] <test>",
+        "Debug a test by number or name; -b breaks at the start of the test",
     ),
     spec("help", &["h"], "help [command]", "Show help"),
     spec("quit", &["q", "exit"], "quit", "Exit ddbg"),
@@ -188,9 +188,20 @@ pub fn parse(line: &str) -> Result<Input, String> {
         "test-run" => Ok(Input::Command(Command::TestRun(
             parse_test_selector(rest).ok_or_else(usage)?,
         ))),
-        "test-debug" => Ok(Input::Command(Command::TestDebug(
-            parse_test_selector(rest).ok_or_else(usage)?,
-        ))),
+        "test-debug" => {
+            let mut break_at_start = false;
+            let mut test = Vec::new();
+            for w in rest.split_whitespace() {
+                match w {
+                    "-b" | "--break" => break_at_start = true,
+                    _ => test.push(w),
+                }
+            }
+            Ok(Input::Command(Command::TestDebug {
+                test: parse_test_selector(&test.join(" ")).ok_or_else(usage)?,
+                break_at_start,
+            }))
+        }
         "help" => Ok(Input::Help((!rest.is_empty()).then(|| rest.to_owned()))),
         "quit" => no_args(Command::Quit),
         other => unreachable!("unhandled command {other}"),
@@ -365,7 +376,20 @@ mod tests {
         assert_eq!(cmd("frame"), Command::Frame(FrameSelector::Current));
         assert_eq!(cmd("f 2"), Command::Frame(FrameSelector::Index(2)));
         assert_eq!(cmd("up"), Command::Frame(FrameSelector::Up));
-        assert_eq!(cmd("td 2"), Command::TestDebug(TestSelector::Index(2)));
+        assert_eq!(
+            cmd("td 2"),
+            Command::TestDebug {
+                test: TestSelector::Index(2),
+                break_at_start: false
+            }
+        );
+        let brk = Command::TestDebug {
+            test: TestSelector::Name("a::x".into()),
+            break_at_start: true,
+        };
+        assert_eq!(cmd("td -b a::x"), brk);
+        assert_eq!(cmd("test-debug a::x --break"), brk);
+        assert!(parse("td -b").is_err());
         assert_eq!(
             cmd("tr parser::tests::x"),
             Command::TestRun(TestSelector::Name("parser::tests::x".into()))

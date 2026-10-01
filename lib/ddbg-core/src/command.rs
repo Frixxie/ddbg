@@ -33,7 +33,12 @@ pub enum Command {
 
     Tests(TestQuery),
     TestRun(TestSelector),
-    TestDebug(TestSelector),
+    /// Debug a test; with `break_at_start`, first set a breakpoint at the
+    /// start of the test.
+    TestDebug {
+        test: TestSelector,
+        break_at_start: bool,
+    },
 
     Quit,
 }

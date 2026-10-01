@@ -324,7 +324,7 @@ impl Engine {
             Command::Locals => self.cmd_locals().await,
             Command::Tests(_) => Err(anyhow!("test discovery is not implemented yet")),
             Command::TestRun(_) => Err(anyhow!("test-run is not implemented yet")),
-            Command::TestDebug(_) => Err(anyhow!("test-debug is not implemented yet")),
+            Command::TestDebug { .. } => Err(anyhow!("test-debug is not implemented yet")),
             Command::Quit => {
                 self.shutdown().await;
                 Ok(Reply::Quit)

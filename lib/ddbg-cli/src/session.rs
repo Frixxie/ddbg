@@ -46,13 +46,23 @@ impl Session {
                 progress("building tests...");
                 Some(self.tests.run(sel).await)
             }
-            Command::TestDebug(sel) => {
+            Command::TestDebug {
+                test,
+                break_at_start,
+            } => {
                 progress("building tests...");
                 // Test targets are complete; no program resolution needed.
-                match self.tests.debug_target(sel).await {
-                    Ok(t) => return self.engine_execute(Command::Run(Some(t))).await,
+                let (target, start) = match self.tests.debug_target(test).await {
+                    Ok(t) => t,
                     Err(e) => return Outcome::Error(format!("{e:#}")),
+                };
+                if *break_at_start {
+                    let brk = Command::Break(start);
+                    if let Err(e) = self.engine.execute(brk).await {
+                        return Outcome::Error(format!("breakpoint at test start: {e:#}"));
+                    }
                 }
+                return self.engine_execute(Command::Run(Some(target))).await;
             }
             _ => None,
         };
