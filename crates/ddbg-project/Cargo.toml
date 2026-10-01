@@ -1,0 +1,6 @@
+[package]
+name = "ddbg-project"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
