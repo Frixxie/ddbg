@@ -129,9 +129,12 @@ pub async fn run(prepared: Prepared) -> anyhow::Result<()> {
     for cmd in initial {
         app.execute(cmd);
     }
-    // Several binaries and none chosen: ask up front.
+    // Several binaries and none chosen: defer the choice until the user runs.
     if app.program.is_none() && app.candidates.len() > 1 {
-        app.open_program_picker();
+        app.log(format!(
+            "{} programs detected. Press r or e to choose one.",
+            app.candidates.len()
+        ));
     }
 
     let mut terminal = ratatui::init();
