@@ -121,8 +121,17 @@ impl TestProvider for DotNetTestProvider {
         let mut cases = Vec::new();
         for asm in self.build().await? {
             let (framework, names) = self.list(&asm).await?;
+            let mut sources = None;
             for name in names.into_iter().filter(|n| query.matches(n)) {
-                cases.push(test_case(&asm, &framework, name));
+                let mut case = test_case(&asm, &framework, name);
+                let sources = sources.get_or_insert_with(|| {
+                    asm.project.parent().map(read_sources).unwrap_or_default()
+                });
+                if let Some((file, line)) = locate_method(sources, method_name(&case.name)) {
+                    case.source = Some(file);
+                    case.line = Some(line);
+                }
+                cases.push(case);
             }
         }
         Ok(cases)
@@ -241,6 +250,118 @@ fn test_case(asm: &TestAssembly, framework: &Framework, name: String) -> TestCas
         line: None,
         suite,
     }
+}
+
+/// C# sources of a project directory (skipping `bin` and `obj`).
+fn read_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_owned()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ty) = entry.file_type() else { continue };
+            if ty.is_dir() {
+                let name = entry.file_name();
+                if !matches!(name.to_str(), Some("bin" | "obj") | None)
+                    && !name.to_string_lossy().starts_with('.')
+                {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "cs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push((path, text));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Source file and 1-based line where the body of test method
+/// `Ns.Class.Method` (or `Ns.Outer+Inner.Method`) starts.
+///
+/// A line breakpoint is needed rather than a function breakpoint: the body
+/// of an `async` method lives in a compiler-generated state machine, so a
+/// function breakpoint on the method name never binds.
+fn locate_method(sources: &[(PathBuf, String)], name: &str) -> Option<(PathBuf, u32)> {
+    let (qualified_class, method) = name.rsplit_once('.')?;
+    let (namespace, class) = match qualified_class.rsplit_once('.') {
+        Some((ns, c)) => (Some(ns), c),
+        None => (None, qualified_class),
+    };
+    // Nested classes are reported as `Outer+Inner`; generic ones as `C`1`.
+    let class = class.rsplit('+').next()?;
+    let class = class.split('`').next()?;
+    sources.iter().find_map(|(path, text)| {
+        if let Some(ns) = namespace
+            && !text.contains(&format!("namespace {ns}"))
+        {
+            return None;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let class_at = lines.iter().position(|l| declares(l, "class", class))?;
+        let decl = (class_at..lines.len()).find(|&i| declares_method(lines[i], method))?;
+        // Prefer the line with the opening brace, where the body starts.
+        let body = (decl..lines.len().min(decl + 10))
+            .find(|&i| {
+                let l = strip_comment(lines[i]);
+                l.contains('{') || l.contains("=>")
+            })
+            .unwrap_or(decl);
+        Some((path.clone(), u32::try_from(body + 1).ok()?))
+    })
+}
+
+fn strip_comment(line: &str) -> &str {
+    line.split_once("//").map_or(line, |(code, _)| code)
+}
+
+/// `line` declares `<keyword> <name>` (e.g. `public sealed class Foo : Bar`).
+fn declares(line: &str, keyword: &str, name: &str) -> bool {
+    let mut words = strip_comment(line)
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty());
+    while let Some(w) = words.next() {
+        if w == keyword {
+            return words.next() == Some(name);
+        }
+    }
+    false
+}
+
+/// `line` looks like the declaration (not a call) of method `name`.
+fn declares_method(line: &str, name: &str) -> bool {
+    let code = strip_comment(line);
+    let Some(at) = find_word(code, name) else {
+        return false;
+    };
+    let before = code[..at].trim_end();
+    let after = code[at + name.len()..].trim_start();
+    // Declarations have a return type (an identifier, `>`, `]` or `?`)
+    // right before the name and an argument list or generics after it.
+    (after.starts_with('(') || after.starts_with('<'))
+        && before
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || matches!(c, '>' | ']' | '?'))
+        && !before.ends_with("new")
+        && !before.ends_with("return")
+        && !before.ends_with("await")
+}
+
+fn find_word(haystack: &str, word: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    haystack.match_indices(word).map(|(i, _)| i).find(|&i| {
+        !haystack[..i].chars().next_back().is_some_and(is_ident)
+            && !haystack[i + word.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_ident)
+    })
 }
 
 /// Cheap pre-filter so non-test projects are not built.
@@ -391,6 +512,40 @@ Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
         assert_eq!(parse_summary(&s(1, 0, 1)), Some(TestOutcome::Ignored));
         assert_eq!(parse_summary(&s(0, 0, 0)), Some(TestOutcome::Failed));
         assert_eq!(parse_summary("crashed"), None);
+    }
+
+    #[test]
+    fn locates_test_methods() {
+        let src = "namespace Ns.Web;
+
+public class Other { public void Run() { } }
+
+public class Tests : IAsyncDisposable
+{
+    [Fact]
+    public void Run() => Assert.True(true);
+
+    [Fact]
+    public async Task ShouldPost() // comment {
+    {
+        await ShouldPost2();
+    }
+
+    public class Inner
+    {
+        [Fact] public void Deep()
+        {
+        }
+    }
+}
+";
+        let sources = vec![(PathBuf::from("/p/T.cs"), src.to_owned())];
+        let at = |n: &str| locate_method(&sources, n).map(|(_, l)| l);
+        assert_eq!(at("Ns.Web.Tests.ShouldPost"), Some(12));
+        assert_eq!(at("Ns.Web.Tests.Run"), Some(8));
+        assert_eq!(at("Ns.Web.Tests+Inner.Deep"), Some(19));
+        assert_eq!(at("Ns.Web.Tests.Missing"), None);
+        assert_eq!(at("Other.Ns.Tests.ShouldPost"), None);
     }
 
     #[test]
