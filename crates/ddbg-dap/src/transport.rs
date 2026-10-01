@@ -1,5 +1,6 @@
 //! Adapter process transport (stdin/stdout).
 
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -28,6 +29,51 @@ impl AdapterCommand {
         self.args.push(arg.into());
         self
     }
+
+    /// Resolve `program` to an absolute path.
+    ///
+    /// Looks in `PATH` first; on macOS falls back to `xcrun -f`, which is
+    /// where Xcode ships `lldb-dap`.
+    pub fn resolve(mut self) -> Result<Self> {
+        if let Some(path) = find_program(&self.program) {
+            self.program = path.to_string_lossy().into_owned();
+            return Ok(self);
+        }
+        Err(DapError::Spawn {
+            command: self.program,
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found in PATH"),
+        })
+    }
+}
+
+/// Find an executable by name, searching `PATH` (and `xcrun` on macOS).
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("xcrun")
+            .args(["-f", name])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// A running adapter process plus its DAP connection.
