@@ -15,6 +15,7 @@ use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::functions::Function;
+use crate::highlight::{self, StyledLine};
 use crate::picker::{FunctionPicker, Program, ProgramPicker, TestPicker};
 use crate::{Executor, Msg};
 
@@ -52,6 +53,8 @@ pub struct SourceView {
     pub path: PathBuf,
     /// `None` when the file could not be read.
     pub lines: Option<Vec<String>>,
+    /// Syntax-highlighted `lines`; empty when the file could not be read.
+    pub styled: Vec<StyledLine>,
 }
 
 pub struct App {
@@ -68,7 +71,7 @@ pub struct App {
     pub show_help: bool,
 
     pub source: Option<SourceView>,
-    sources: HashMap<PathBuf, Option<Vec<String>>>,
+    sources: HashMap<PathBuf, (Option<Vec<String>>, Vec<StyledLine>)>,
     /// Line the debuggee is stopped at (1-based), in `source`.
     pub exec_line: Option<u32>,
     /// Cursor in the source pane (1-based).
@@ -300,18 +303,24 @@ impl App {
         if self.source.as_ref().is_some_and(|s| s.path == path) {
             return;
         }
-        let lines = self
+        let (lines, styled) = self
             .sources
             .entry(path.to_path_buf())
             .or_insert_with(|| {
-                std::fs::read_to_string(path)
+                let lines: Option<Vec<String>> = std::fs::read_to_string(path)
                     .ok()
-                    .map(|s| s.lines().map(|l| l.replace('\t', "    ")).collect())
+                    .map(|s| s.lines().map(|l| l.replace('\t', "    ")).collect());
+                let styled = lines
+                    .as_deref()
+                    .map(|l| highlight::highlight(path, l))
+                    .unwrap_or_default();
+                (lines, styled)
             })
             .clone();
         self.source = Some(SourceView {
             path: path.to_path_buf(),
             lines,
+            styled,
         });
     }
 

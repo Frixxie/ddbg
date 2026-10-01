@@ -342,13 +342,20 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Span::raw(" ")
             };
-            let mut line = Line::from(vec![
+            let mut spans = vec![
                 gutter,
                 Span::styled(format!("{n:>width$} "), Style::new().fg(Color::DarkGray)),
                 arrow,
                 Span::raw(" "),
-                Span::raw(text.as_str()),
-            ]);
+            ];
+            match source.styled.get(i) {
+                Some(segs) => spans.extend(
+                    segs.iter()
+                        .map(|(style, s)| Span::styled(s.as_str(), *style)),
+                ),
+                None => spans.push(Span::raw(text.as_str())),
+            }
+            let mut line = Line::from(spans);
             if is_exec {
                 line = line.style(Style::new().bg(Color::Rgb(60, 60, 0)));
             }

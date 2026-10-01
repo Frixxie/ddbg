@@ -10,6 +10,7 @@
 
 mod app;
 mod functions;
+mod highlight;
 mod picker;
 mod ui;
 
