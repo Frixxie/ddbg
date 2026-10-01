@@ -58,7 +58,7 @@ fn history_path() -> Option<PathBuf> {
     Some(dir.join("history.txt"))
 }
 
-fn build_editor(printer: ExternalPrinter<String>) -> Reedline {
+fn build_editor(printer: ExternalPrinter<String>, completer: DdbgCompleter) -> Reedline {
     let mut keybindings = default_emacs_keybindings();
     keybindings.add_binding(
         KeyModifiers::NONE,
@@ -71,7 +71,7 @@ fn build_editor(printer: ExternalPrinter<String>) -> Reedline {
     let menu = ColumnarMenu::default().with_name("completion_menu");
 
     let mut editor = Reedline::create()
-        .with_completer(Box::new(DdbgCompleter))
+        .with_completer(Box::new(completer))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
         .with_edit_mode(Box::new(Emacs::new(keybindings)))
         .with_external_printer(printer);
@@ -121,8 +121,16 @@ pub async fn run(session: Session, initial: Vec<Command>, verbose: bool) -> anyh
     // output is queued before the next prompt is drawn.
     let (line_tx, mut line_rx) = mpsc::channel::<LineEvent>(1);
     let (ack_tx, ack_rx) = std_mpsc::channel::<()>();
+    let completion_tests = Arc::new(Mutex::new(Vec::new()));
+    let completer = DdbgCompleter {
+        cwd: session.cwd.clone(),
+        tests: completion_tests.clone(),
+        engine: session.engine.clone(),
+        runtime: tokio::runtime::Handle::current(),
+        functions: None,
+    };
     std::thread::spawn(move || {
-        let mut editor = build_editor(printer);
+        let mut editor = build_editor(printer, completer);
         let prompt = DdbgPrompt;
         loop {
             let event = match editor.read_line(&prompt) {
@@ -146,6 +154,7 @@ pub async fn run(session: Session, initial: Vec<Command>, verbose: bool) -> anyh
         renderer,
         out,
         last_repeatable: None,
+        completion_tests,
     };
     for cmd in initial {
         repl.execute(cmd).await;
@@ -179,6 +188,7 @@ struct Repl {
     out: std_mpsc::SyncSender<String>,
     /// Command repeated by an empty line (like gdb).
     last_repeatable: Option<Command>,
+    completion_tests: Arc<Mutex<Vec<String>>>,
 }
 
 impl Repl {
@@ -217,7 +227,15 @@ impl Repl {
         let mut progress = |s: &str| {
             let _ = out.send(s.to_owned());
         };
-        match self.session.execute(cmd, &mut progress).await {
+        let outcome = self.session.execute(cmd, &mut progress).await;
+        *self.completion_tests.lock().unwrap() = self
+            .session
+            .tests
+            .listed()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        match outcome {
             Outcome::Quit => return true,
             Outcome::Reply(cmd, reply) => {
                 if let Some(text) = self.renderer.lock().unwrap().reply(&cmd, &reply) {

@@ -3,6 +3,7 @@
 mod adapter_test;
 mod args;
 mod commands;
+pub mod functions;
 mod logging;
 pub mod parser;
 pub mod render;

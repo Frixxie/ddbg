@@ -19,6 +19,11 @@ pub struct Tests {
 }
 
 impl Tests {
+    /// Most recently displayed tests, with the same numbering as `test-run`.
+    pub fn listed(&self) -> &[TestCase] {
+        &self.listed
+    }
+
     pub fn new(provider: Option<AnyProvider>, unavailable: impl Into<String>) -> Self {
         Self {
             provider,

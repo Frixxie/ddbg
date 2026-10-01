@@ -116,8 +116,17 @@ Process exited normally.
 | `help [command]` | `h` | Show help |
 | `quit` | `q` | Exit (also Ctrl-D) |
 
-An empty line repeats the last `next`/`step`/`finish`/`continue`. Tab
-completes commands and file paths; history is saved between sessions.
+An empty line repeats the last `next`/`step`/`finish`/`continue`. History is
+saved between sessions. Press Tab for context-aware completion (aliases work too):
+
+- `break`: file paths and source function names, including `src/file.rs:function`.
+  Functions are scanned on first use, using the same discovery as the TUI picker.
+- `run`: file paths.
+- `test-run`, `test-debug`, `tests`: names from the most recently listed tests;
+  run/debug also complete test numbers. `test-debug` completes `-b` / `--break`.
+- `print`: local variable names in the selected frame while stopped.
+- `delete`: existing breakpoint IDs; `thread`: thread IDs; `frame`: stack indices.
+- Command names and `help` topics.
 
 ### Tests
 
