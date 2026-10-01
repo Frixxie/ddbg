@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use ddbg_cli::Outcome;
 use ddbg_cli::parser::{Input, parse};
 use ddbg_cli::render::{Renderer, help};
+use ddbg_cli::testing::render_list;
 use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation, path_matches};
-use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables};
+use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::frame::StackFrame;
 use ddbg_core::{DebugEvent, EngineHandle};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::picker::TestPicker;
 use crate::{Executor, Msg};
 
 const MAX_LOG_LINES: usize = 5000;
@@ -85,6 +87,9 @@ pub struct App {
     pub input: Option<String>,
     history: Vec<String>,
     history_pos: Option<usize>,
+
+    /// Open test picker.
+    pub picker: Option<TestPicker>,
 }
 
 impl App {
@@ -115,6 +120,7 @@ impl App {
             input: None,
             history: Vec::new(),
             history_pos: None,
+            picker: None,
         }
     }
 
@@ -207,10 +213,21 @@ impl App {
                 }
                 self.apply_reply(reply);
             }
+            Outcome::Tests(tests) => match &mut self.picker {
+                Some(picker) if picker.tests.is_none() => picker.set_tests(tests),
+                _ if silent => {}
+                _ => self.log(render_list(&tests)),
+            },
             Outcome::Text(text) => self.log(text),
             // Background refreshes fail routinely (e.g. not stopped).
             Outcome::Error(_) if silent => {}
-            Outcome::Error(e) => self.log(format!("error: {e}")),
+            Outcome::Error(e) => {
+                // A failed discovery should not leave the picker loading.
+                if self.picker.as_ref().is_some_and(|p| p.tests.is_none()) {
+                    self.picker = None;
+                }
+                self.log(format!("error: {e}"));
+            }
         }
     }
 
@@ -332,10 +349,15 @@ impl App {
             self.show_help = false;
             return;
         }
+        if self.picker.is_some() {
+            self.picker_key(key);
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => self.execute(Command::Quit),
             KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('t') => self.open_picker(),
             KeyCode::Char(':') => {
                 self.input = Some(String::new());
                 self.history_pos = None;
@@ -371,6 +393,52 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn open_picker(&mut self) {
+        self.picker = Some(TestPicker::default());
+        // Discover on every open so the list reflects current sources.
+        self.execute(Command::Tests(TestQuery::default()));
+    }
+
+    /// Keys while the test picker is open. Typing filters; Ctrl chords act.
+    fn picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let act = |p: &TestPicker, f: fn(TestSelector) -> Command| {
+            p.selected().map(|t| f(TestSelector::Name(t.name.clone())))
+        };
+        let cmd = match key.code {
+            KeyCode::Esc => {
+                self.picker = None;
+                return;
+            }
+            KeyCode::Up => return picker.move_cursor(-1),
+            KeyCode::Down => return picker.move_cursor(1),
+            KeyCode::PageUp => return picker.move_cursor(-10),
+            KeyCode::PageDown => return picker.move_cursor(10),
+            KeyCode::Char('p') if ctrl => return picker.move_cursor(-1),
+            KeyCode::Char('n') if ctrl => return picker.move_cursor(1),
+            KeyCode::Backspace => return picker.pop(),
+            KeyCode::Enter => act(picker, |test| Command::TestDebug {
+                test,
+                break_at_start: false,
+            }),
+            KeyCode::Char('b') if ctrl => act(picker, |test| Command::TestDebug {
+                test,
+                break_at_start: true,
+            }),
+            KeyCode::Char('r') if ctrl => act(picker, Command::TestRun),
+            KeyCode::Char(c) if !ctrl => return picker.push(c),
+            _ => return,
+        };
+        if let Some(cmd) = cmd {
+            self.picker = None;
+            self.log_scroll = 0;
+            self.execute(cmd);
         }
     }
 

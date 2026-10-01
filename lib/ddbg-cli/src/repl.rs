@@ -224,6 +224,7 @@ impl Repl {
                     self.print(text);
                 }
             }
+            Outcome::Tests(tests) => self.print(crate::testing::render_list(&tests)),
             Outcome::Text(text) => self.print(text),
             Outcome::Error(e) => self.print(format!("error: {e}")),
         }

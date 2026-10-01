@@ -7,6 +7,7 @@ use ddbg_core::command::Command;
 use ddbg_core::{EngineHandle, Reply};
 
 use crate::testing::Tests;
+pub use ddbg_test::TestCase;
 
 /// Result of executing one command, for a frontend to present.
 #[derive(Debug)]
@@ -14,7 +15,9 @@ use crate::testing::Tests;
 pub enum Outcome {
     /// The engine answered; render with [`crate::render::Renderer::reply`].
     Reply(Command, Reply),
-    /// Preformatted text (test lists and test runs).
+    /// Discovered tests; render with [`crate::testing::render_list`].
+    Tests(Vec<TestCase>),
+    /// Preformatted text (test runs).
     Text(String),
     Error(String),
     Quit,
@@ -40,7 +43,10 @@ impl Session {
         let text = match &cmd {
             Command::Tests(q) => {
                 progress("discovering tests...");
-                Some(self.tests.list(q).await)
+                return match self.tests.list(q).await {
+                    Ok(tests) => Outcome::Tests(tests),
+                    Err(e) => Outcome::Error(format!("{e:#}")),
+                };
             }
             Command::TestRun(sel) => {
                 progress("building tests...");

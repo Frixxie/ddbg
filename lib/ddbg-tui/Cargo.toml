@@ -9,3 +9,6 @@ ddbg-cli.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+ddbg-test.workspace = true

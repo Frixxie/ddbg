@@ -20,7 +20,7 @@ use ddbg_project::{Project, ProjectKind};
 use ddbg_test::{AnyProvider, DotNetTestProvider, RustTestProvider};
 
 pub use args::{Args, Subcommand};
-pub use session::{Outcome, Session};
+pub use session::{Outcome, Session, TestCase};
 
 /// Everything a frontend needs to start: a running engine and setup.
 pub struct Prepared {

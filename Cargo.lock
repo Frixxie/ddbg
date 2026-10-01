@@ -467,6 +467,7 @@ dependencies = [
  "anyhow",
  "ddbg-cli",
  "ddbg-core",
+ "ddbg-test",
  "ratatui",
  "tokio",
 ]

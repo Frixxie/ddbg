@@ -9,6 +9,7 @@
 //! events, so the screen stays responsive while a test builds.
 
 mod app;
+mod picker;
 mod ui;
 
 use std::sync::Arc;

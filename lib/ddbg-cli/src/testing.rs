@@ -34,12 +34,12 @@ impl Tests {
     }
 
     /// `tests [filter]`: discover and number matching tests.
-    pub async fn list(&mut self, query: &QueryCmd) -> anyhow::Result<String> {
+    pub async fn list(&mut self, query: &QueryCmd) -> anyhow::Result<Vec<TestCase>> {
         let query = TestQuery {
             filter: query.filter.clone(),
         };
         self.listed = self.provider()?.discover(&query).await?;
-        Ok(render_list(&self.listed))
+        Ok(self.listed.clone())
     }
 
     /// `test-run <test>`.
@@ -118,7 +118,8 @@ fn pick_name(found: &[TestCase], name: &str) -> anyhow::Result<TestCase> {
     }
 }
 
-fn render_list(tests: &[TestCase]) -> String {
+/// Numbered test list, as shown by `tests`.
+pub fn render_list(tests: &[TestCase]) -> String {
     if tests.is_empty() {
         return "no tests found".into();
     }

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Status};
+use crate::picker::TestPicker;
 
 const KEYS: &[(&str, &str)] = &[
     ("r", "run / restart"),
@@ -23,6 +24,7 @@ const KEYS: &[(&str, &str)] = &[
     ("j/k, arrows", "move / scroll"),
     ("g / G", "top / bottom"),
     ("Tab", "cycle focus: source, stack, log"),
+    ("t", "pick a test to debug or run"),
     (":", "command line (REPL syntax)"),
     ("q", "quit"),
 ];
@@ -51,9 +53,105 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_breakpoints(f, app, breakpoints);
     draw_log(f, app, log);
     draw_bottom(f, app, bottom);
+    if let Some(picker) = &app.picker {
+        draw_picker(f, app, picker);
+    }
     if app.show_help {
         draw_help(f);
     }
+}
+
+/// Centered rect of at most `w`x`h` cells.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let (w, h) = (w.min(area.width), h.min(area.height));
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
+}
+
+fn draw_picker(f: &mut Frame, app: &App, picker: &TestPicker) {
+    let area = f.area();
+    let rect = centered(area, area.width * 4 / 5, area.height * 4 / 5);
+    let matches = picker.matches();
+    let title = match &picker.tests {
+        None => "tests (discovering...)".to_owned(),
+        Some(all) => format!("tests {}/{}", matches.len(), all.len()),
+    };
+    let block = block(&title, true);
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    let [filter, list, detail, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    f.render_widget(
+        Line::from(vec![
+            Span::styled("> ", Style::new().fg(Color::Cyan).bold()),
+            Span::raw(picker.filter.as_str()),
+        ]),
+        filter,
+    );
+    f.set_cursor_position((
+        filter.x + 2 + picker.filter.chars().count() as u16,
+        filter.y,
+    ));
+
+    let items: Vec<ListItem> = matches
+        .iter()
+        .map(|t| {
+            let mut spans = vec![Span::raw(t.name.clone())];
+            if t.display_name != t.name {
+                spans.push(Span::styled(
+                    format!("  {}", t.display_name),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !matches.is_empty() {
+        state.select(Some(picker.cursor));
+    }
+    let empty = picker.tests.is_some() && matches.is_empty();
+    f.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().reversed()),
+        list,
+        &mut state,
+    );
+    if empty {
+        f.render_widget(
+            Line::styled("no matching tests", Style::new().fg(Color::DarkGray)),
+            list,
+        );
+    }
+
+    if let Some(t) = picker.selected()
+        && let Some(src) = &t.source
+    {
+        let path = src.strip_prefix(&app.cwd).unwrap_or(src).display();
+        let loc = match t.line {
+            Some(l) => format!("{path}:{l}"),
+            None => path.to_string(),
+        };
+        f.render_widget(Line::styled(loc, Style::new().fg(Color::DarkGray)), detail);
+    }
+    f.render_widget(
+        Line::styled(
+            "Enter debug  ^B debug+break  ^R run  ↑/↓ move  Esc close",
+            Style::new().fg(Color::DarkGray),
+        ),
+        hint,
+    );
 }
 
 fn block(title: &str, focused: bool) -> Block<'static> {
@@ -289,7 +387,8 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             f.set_cursor_position((area.x + 1 + input.chars().count() as u16, area.y));
         }
         None => {
-            let hint = "r run  c cont  n next  s step  f finish  b break  : cmd  ? help  q quit";
+            let hint =
+                "r run  c cont  n next  s step  f finish  b break  t tests  : cmd  ? help  q quit";
             f.render_widget(Line::styled(hint, Style::new().fg(Color::DarkGray)), area);
         }
     }
@@ -297,14 +396,7 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame) {
     let area = f.area();
-    let w = 52.min(area.width);
-    let h = (KEYS.len() as u16 + 4).min(area.height);
-    let rect = Rect::new(
-        area.x + (area.width - w) / 2,
-        area.y + (area.height - h) / 2,
-        w,
-        h,
-    );
+    let rect = centered(area, 52, KEYS.len() as u16 + 4);
     let lines: Vec<Line> = KEYS
         .iter()
         .map(|(k, d)| {
