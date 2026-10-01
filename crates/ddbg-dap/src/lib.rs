@@ -4,10 +4,9 @@
 //! serialization, request/response correlation and event dispatch.
 
 pub mod codec;
-pub mod error;
 pub mod protocol;
 
-pub use error::{CodecError, DapError, Result};
+pub use anyhow::Result;
 pub mod client;
 pub mod transport;
 

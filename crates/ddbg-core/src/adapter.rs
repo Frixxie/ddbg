@@ -8,8 +8,8 @@ use ddbg_dap::AdapterCommand;
 use ddbg_dap::transport::find_program;
 use serde_json::{Value, json};
 
-use crate::error::{AdapterError, Result};
 use crate::target::{AttachTarget, LaunchTarget};
+use anyhow::{Result, anyhow};
 
 pub trait DebugAdapter: Send + Sync {
     /// Value for `initialize.adapterID`.
@@ -24,7 +24,7 @@ pub trait DebugAdapter: Send + Sync {
 }
 
 fn resolve(program: &str, args: &[String]) -> Result<AdapterCommand> {
-    let path = find_program(program).ok_or_else(|| AdapterError::NotFound(program.to_owned()))?;
+    let path = find_program(program).ok_or_else(|| anyhow!("{program} was not found in PATH"))?;
     Ok(AdapterCommand {
         program: path.to_string_lossy().into_owned(),
         args: args.to_vec(),

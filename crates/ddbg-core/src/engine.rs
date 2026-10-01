@@ -8,20 +8,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ddbg_dap::client::channel_closed;
 use ddbg_dap::protocol::{
     self as dap, ConfigurationDoneArguments, ContinueArguments, DapEvent, DisconnectArguments,
     EvaluateArguments, InitializeArguments, LaunchArguments, NextArguments, PauseArguments,
     ScopesArguments, StackTraceArguments, StepInArguments, StepOutArguments, ThreadsArguments,
     VariablesArguments,
 };
-use ddbg_dap::{AdapterProcess, DapClient, DapError, Incoming};
+use ddbg_dap::{AdapterProcess, DapClient, Incoming};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::adapter::DebugAdapter;
 use crate::breakpoint::BreakpointId;
 use crate::command::{Command, FrameSelector, Location, Reply, ScopeVariables};
-use crate::error::{CommandError, Result};
+use anyhow::{Result, anyhow, bail};
+
+use crate::error::{NO_TARGET, NO_THREAD, NOT_RUNNING, NOT_STOPPED};
 use crate::event::{DebugEvent, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
 use crate::target::{DebugTarget, LaunchTarget};
@@ -77,8 +80,8 @@ impl EngineHandle {
         self.cmd_tx
             .send((command, tx))
             .await
-            .map_err(|_| DapError::ChannelClosed)?;
-        rx.await.map_err(|_| DapError::ChannelClosed)?
+            .map_err(|_| channel_closed())?;
+        rx.await.map_err(|_| channel_closed())?
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<DebugEvent> {
@@ -162,7 +165,7 @@ impl Engine {
         self.conn
             .as_ref()
             .map(|c| c.client.clone())
-            .ok_or_else(|| CommandError::NotRunning.into())
+            .ok_or_else(|| anyhow!(NOT_RUNNING))
     }
 
     // -----------------------------------------------------------------------
@@ -183,7 +186,7 @@ impl Engine {
             }
             Command::Pause => {
                 if !matches!(self.session.status, SessionStatus::Running) {
-                    return Err(CommandError::NotRunning.into());
+                    bail!(NOT_RUNNING);
                 }
                 let client = self.client()?;
                 let tid = match self.session.selected_thread {
@@ -194,7 +197,7 @@ impl Engine {
                             .threads
                             .first()
                             .map(|t| t.id)
-                            .ok_or(CommandError::NoThread)?
+                            .ok_or_else(|| anyhow!(NO_THREAD))?
                     }
                 };
                 client.request(PauseArguments { thread_id: tid.0 }).await?;
@@ -202,7 +205,7 @@ impl Engine {
             }
             Command::Kill => {
                 if !self.session.status.is_active() {
-                    return Err(CommandError::NotRunning.into());
+                    bail!(NOT_RUNNING);
                 }
                 self.shutdown().await;
                 Ok(Reply::Ok)
@@ -252,7 +255,7 @@ impl Engine {
                     .session
                     .breakpoints
                     .remove(id)
-                    .ok_or(CommandError::NoSuchBreakpoint(id))?;
+                    .ok_or_else(|| anyhow!("no breakpoint {id}"))?;
                 if self.can_set_breakpoints() {
                     self.sync_breakpoints(&bp.requested.path).await?;
                 }
@@ -273,7 +276,7 @@ impl Engine {
             }
             Command::Threads => {
                 if !self.session.status.is_active() {
-                    return Err(CommandError::NotRunning.into());
+                    bail!(NOT_RUNNING);
                 }
                 self.refresh_threads().await?;
                 Ok(Reply::Threads {
@@ -287,7 +290,7 @@ impl Engine {
                     self.refresh_threads().await?;
                 }
                 if !self.session.threads.iter().any(|t| t.id == tid) {
-                    return Err(CommandError::NoSuchThread(tid.0).into());
+                    bail!("no thread {tid}");
                 }
                 self.session.selected_thread = Some(tid);
                 self.load_stack(tid).await?;
@@ -304,12 +307,12 @@ impl Engine {
                     FrameSelector::Current => current,
                     FrameSelector::Index(i) => i,
                     FrameSelector::Up => current + 1,
-                    FrameSelector::Down => {
-                        current.checked_sub(1).ok_or(CommandError::NoSuchFrame(0))?
-                    }
+                    FrameSelector::Down => current
+                        .checked_sub(1)
+                        .ok_or_else(|| anyhow!("no frame {}", 0))?,
                 };
                 if index >= self.session.stack.len() {
-                    return Err(CommandError::NoSuchFrame(index).into());
+                    bail!("no frame {index}");
                 }
                 if index != current || self.session.selected_frame.is_none() {
                     self.select_frame(index).await?;
@@ -319,9 +322,9 @@ impl Engine {
             }
             Command::Print(expr) => self.cmd_print(expr).await,
             Command::Locals => self.cmd_locals().await,
-            Command::Tests(_) => Err(CommandError::NotImplemented("test discovery").into()),
-            Command::TestRun(_) => Err(CommandError::NotImplemented("test-run").into()),
-            Command::TestDebug(_) => Err(CommandError::NotImplemented("test-debug").into()),
+            Command::Tests(_) => Err(anyhow!("test discovery is not implemented yet")),
+            Command::TestRun(_) => Err(anyhow!("test-run is not implemented yet")),
+            Command::TestDebug(_) => Err(anyhow!("test-debug is not implemented yet")),
             Command::Quit => {
                 self.shutdown().await;
                 Ok(Reply::Quit)
@@ -334,9 +337,9 @@ impl Engine {
             SessionStatus::Stopped(_) => self
                 .session
                 .selected_thread
-                .ok_or(CommandError::NoThread.into()),
-            SessionStatus::Running => Err(CommandError::NotStopped.into()),
-            _ => Err(CommandError::NotRunning.into()),
+                .ok_or_else(|| anyhow!(NO_THREAD)),
+            SessionStatus::Running => Err(anyhow!(NOT_STOPPED)),
+            _ => Err(anyhow!(NOT_RUNNING)),
         }
     }
 
@@ -354,7 +357,7 @@ impl Engine {
             .stack
             .get(index)
             .cloned()
-            .ok_or(CommandError::NoSuchFrame(index))?;
+            .ok_or_else(|| anyhow!("no frame {}", index))?;
         Ok(Reply::Frame { index, frame })
     }
 
@@ -375,9 +378,9 @@ impl Engine {
         let target = match &self.session.target {
             Some(DebugTarget::Launch(t)) => t.clone(),
             Some(DebugTarget::Attach(_)) => {
-                return Err(CommandError::NotImplemented("attach").into());
+                return Err(anyhow!("attach is not implemented yet"));
             }
-            None => return Err(CommandError::NoTarget.into()),
+            None => bail!(NO_TARGET),
         };
         if self.conn.is_some() {
             self.shutdown().await;
@@ -420,7 +423,7 @@ impl Engine {
                 }
                 msg = incoming.recv() => match msg {
                     Some(Incoming::Event(DapEvent::Initialized)) => break,
-                    None => return Err(DapError::ChannelClosed.into()),
+                    None => return Err(channel_closed()),
                     other => self.handle_incoming(other).await,
                 }
             }
@@ -456,7 +459,7 @@ impl Engine {
 
     async fn cmd_print(&mut self, expression: String) -> Result<Reply> {
         if !self.session.status.is_active() {
-            return Err(CommandError::NotRunning.into());
+            bail!(NOT_RUNNING);
         }
         let frame_id = self.session.current_frame().map(|f| f.id.0);
         let resp = self
@@ -535,7 +538,7 @@ impl Engine {
             .session
             .stack
             .get(index)
-            .ok_or(CommandError::NoSuchFrame(index))?;
+            .ok_or_else(|| anyhow!("no frame {}", index))?;
         let resp = self
             .client()?
             .request(ScopesArguments {

@@ -13,8 +13,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::codec::{Decoder, encode};
-use crate::error::{DapError, Result};
 use crate::protocol::{DapEvent, DapRequest, Message, Request, Response};
+use anyhow::{Context as _, Result, anyhow};
 
 /// Something received asynchronously from the adapter.
 #[derive(Debug, Clone)]
@@ -72,10 +72,8 @@ impl DapClient {
     /// Send a request without waiting. The returned future resolves to the
     /// response. The request is written even if the future is never polled.
     pub fn send<R: DapRequest>(&self, request: R) -> Result<ResponseFuture<R::Response>> {
-        let arguments = serde_json::to_value(&request).map_err(|source| DapError::Body {
-            command: R::COMMAND.into(),
-            source,
-        })?;
+        let arguments = serde_json::to_value(&request)
+            .with_context(|| format!("failed to serialize {} arguments", R::COMMAND))?;
         let raw = self.send_raw(R::COMMAND, Some(arguments))?;
         Ok(ResponseFuture {
             command: R::COMMAND,
@@ -96,7 +94,7 @@ impl DapClient {
         });
         if self.out_tx.send(msg).is_err() {
             self.pending.lock().unwrap().remove(&seq);
-            return Err(DapError::ChannelClosed);
+            return Err(channel_closed());
         }
         Ok(RawResponseFuture { rx })
     }
@@ -117,8 +115,15 @@ impl DapClient {
             message,
             body,
         });
-        self.out_tx.send(msg).map_err(|_| DapError::ChannelClosed)
+        self.out_tx.send(msg).map_err(|_| channel_closed())
     }
+}
+
+/// Message used when the adapter connection is gone.
+pub const CHANNEL_CLOSED: &str = "debug adapter connection closed";
+
+pub fn channel_closed() -> anyhow::Error {
+    anyhow!(CHANNEL_CLOSED)
 }
 
 /// Future resolving to a raw [`Response`].
@@ -131,7 +136,7 @@ impl Future for RawResponseFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.rx)
             .poll(cx)
-            .map(|r| r.map_err(|_| DapError::ChannelClosed))
+            .map(|r| r.map_err(|_| channel_closed()))
     }
 }
 
@@ -162,18 +167,12 @@ fn parse_response<T: serde::de::DeserializeOwned>(command: &str, resp: Response)
             .map(str::to_owned)
             .or(resp.message)
             .unwrap_or_else(|| "unknown error".into());
-        return Err(DapError::Adapter {
-            command: command.into(),
-            message,
-        });
+        return Err(anyhow!("{command} failed: {message}"));
     }
     let body = resp
         .body
         .unwrap_or_else(|| Value::Object(Default::default()));
-    serde_json::from_value(body).map_err(|source| DapError::Body {
-        command: command.into(),
-        source,
-    })
+    serde_json::from_value(body).with_context(|| format!("unexpected response body for {command}"))
 }
 
 async fn write_loop<W: AsyncWrite + Unpin>(
@@ -370,7 +369,7 @@ mod tests {
         }))
         .await;
         let err = f.await.unwrap_err();
-        assert!(matches!(err, DapError::Adapter { ref message, .. } if message == "nope"));
+        assert_eq!(err.to_string(), "threads failed: nope");
     }
 
     #[tokio::test]
@@ -379,7 +378,7 @@ mod tests {
         let f = client.send(ThreadsArguments {}).unwrap();
         let _ = fake.recv().await;
         drop(fake);
-        assert!(matches!(f.await, Err(DapError::ChannelClosed)));
+        assert_eq!(f.await.unwrap_err().to_string(), CHANNEL_CLOSED);
         assert!(rx.recv().await.is_none());
     }
 

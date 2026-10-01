@@ -8,7 +8,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 use crate::client::{DapClient, Incoming};
-use crate::error::{DapError, Result};
+use anyhow::{Context, Result, bail};
 
 /// How to start a debug adapter process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,10 +39,7 @@ impl AdapterCommand {
             self.program = path.to_string_lossy().into_owned();
             return Ok(self);
         }
-        Err(DapError::Spawn {
-            command: self.program,
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found in PATH"),
-        })
+        bail!("{} was not found in PATH", self.program)
     }
 }
 
@@ -94,10 +91,7 @@ impl AdapterProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|source| DapError::Spawn {
-                command: cmd.program.clone(),
-                source,
-            })?;
+            .with_context(|| format!("failed to spawn adapter `{}`", cmd.program))?;
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");

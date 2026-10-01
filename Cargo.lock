@@ -249,9 +249,9 @@ dependencies = [
 name = "ddbg-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ddbg-dap",
  "serde_json",
- "thiserror",
  "tokio",
  "tracing",
 ]
@@ -260,10 +260,10 @@ dependencies = [
 name = "ddbg-dap"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tracing",
 ]
