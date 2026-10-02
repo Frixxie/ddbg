@@ -508,7 +508,7 @@ impl Debugger {
             })
             .await?;
         Ok(match ev {
-            DebugEvent::SessionStopped(info) => Halt::Stopped(info),
+            DebugEvent::SessionStopped(info) => Halt::Stopped(*info),
             DebugEvent::SessionExited(code) => Halt::Exited(code),
             _ => Halt::Terminated,
         })

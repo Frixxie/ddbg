@@ -43,7 +43,7 @@ async fn wait_for(
 
 async fn stopped(rx: &mut broadcast::Receiver<DebugEvent>) -> ddbg_core::event::StopInfo {
     match wait_for(rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await {
-        DebugEvent::SessionStopped(info) => info,
+        DebugEvent::SessionStopped(info) => *info,
         _ => unreachable!(),
     }
 }

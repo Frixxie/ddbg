@@ -469,14 +469,14 @@ mod tests {
 
         let mut r = Renderer::new(dir.clone());
         let out = r
-            .event(&DebugEvent::SessionStopped(StopInfo {
+            .event(&DebugEvent::SessionStopped(Box::new(StopInfo {
                 reason: StopReason::Breakpoint(vec![ddbg_core::breakpoint::BreakpointId(1)]),
                 thread: None,
                 description: None,
                 frame: Some(frame(&file, 2, "app::main")),
                 exception: None,
                 elapsed: Some(Duration::from_micros(12_345)),
-            }))
+            })))
             .unwrap();
         assert_eq!(
             out,
@@ -485,14 +485,14 @@ mod tests {
 
         // stepping within the same function only shows the line
         let out = r
-            .event(&DebugEvent::SessionStopped(StopInfo {
+            .event(&DebugEvent::SessionStopped(Box::new(StopInfo {
                 reason: StopReason::Step,
                 thread: None,
                 description: None,
                 frame: Some(frame(&file, 3, "app::main")),
                 exception: None,
                 elapsed: None,
-            }))
+            })))
             .unwrap();
         assert_eq!(out, "1   fn main() {\n2       let x = 1;\n3 > }");
     }
@@ -508,7 +508,7 @@ mod tests {
             ..Default::default()
         };
         let out = r
-            .event(&DebugEvent::SessionStopped(StopInfo {
+            .event(&DebugEvent::SessionStopped(Box::new(StopInfo {
                 reason: StopReason::Exception(Some("Unhandled".into())),
                 thread: None,
                 description: Some("Outer failed".into()),
@@ -523,7 +523,7 @@ mod tests {
                     )],
                 )),
                 elapsed: None,
-            }))
+            })))
             .unwrap();
         assert_eq!(
             out,

@@ -967,14 +967,14 @@ impl Engine {
             _ => None,
         };
 
-        self.emit(DebugEvent::SessionStopped(StopInfo {
+        self.emit(DebugEvent::SessionStopped(Box::new(StopInfo {
             reason,
             thread: tid,
             description: s.description.or(s.text),
             frame: self.session.stack.first().cloned(),
             exception,
             elapsed,
-        }));
+        })));
         Ok(())
     }
 

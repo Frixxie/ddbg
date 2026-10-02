@@ -1100,7 +1100,7 @@ For example:
 ```rust
 pub enum DebugEvent {
     SessionStarted,
-    SessionStopped(StopInfo),
+    SessionStopped(Box<StopInfo>),
     SessionContinued,
     SessionTerminated,
 

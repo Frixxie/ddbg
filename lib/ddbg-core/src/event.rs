@@ -10,7 +10,7 @@ use crate::thread::ThreadId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugEvent {
     SessionStarted,
-    SessionStopped(StopInfo),
+    SessionStopped(Box<StopInfo>),
     SessionContinued,
     SessionExited(i64),
     SessionTerminated,
