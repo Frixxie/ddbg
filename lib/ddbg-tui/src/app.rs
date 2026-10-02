@@ -104,6 +104,7 @@ mod tests {
                         value: format!("first line\n{}\nlast line", "long value ".repeat(300)),
                         type_name: Some("String".into()),
                         children: None,
+                        evaluate_name: None,
                     }],
                 })
                 .collect(),
@@ -167,6 +168,7 @@ mod tests {
                 value: "1".into(),
                 type_name: None,
                 children: None,
+                evaluate_name: None,
             }],
         }]));
         app.focus = Focus::Locals;
@@ -285,6 +287,10 @@ pub struct App {
     pub locals_cursor: usize,
     /// Scroll offset in the open variable value popup.
     pub value_scroll: Option<u16>,
+    /// Expression being expanded in the value popup.
+    value_expr: Option<String>,
+    /// Members of the variable shown in the value popup.
+    pub value_children: Vec<Variable>,
     /// Exception the debuggee is stopped on, if any.
     pub exception: Option<ExceptionInfo>,
     pub breakpoints: Vec<Breakpoint>,
@@ -347,6 +353,8 @@ impl App {
             locals: Vec::new(),
             locals_cursor: 0,
             value_scroll: None,
+            value_expr: None,
+            value_children: Vec::new(),
             exception: None,
             breakpoints: Vec::new(),
             log: Vec::new(),
@@ -467,6 +475,12 @@ impl App {
             Outcome::Reply(cmd, reply) => {
                 if !silent && let Some(text) = self.renderer.reply(&cmd, &reply) {
                     self.log(text);
+                }
+                if let (Command::Print(expr), Reply::Value(_, children)) = (&cmd, &reply)
+                    && self.value_scroll.is_some()
+                    && self.value_expr.as_ref() == Some(expr)
+                {
+                    self.value_children = children.clone();
                 }
                 self.apply_reply(reply);
             }
@@ -705,6 +719,14 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Locals && self.selected_local().is_some() => {
                 self.value_scroll = Some(0);
+                self.value_children.clear();
+                self.value_expr = self
+                    .selected_local()
+                    .filter(|v| v.children.is_some())
+                    .map(|v| v.evaluate_name.clone().unwrap_or_else(|| v.name.clone()));
+                if let Some(expr) = self.value_expr.clone() {
+                    self.execute_silent(Command::Print(expr));
+                }
             }
             KeyCode::Char('=') if self.focus == Focus::Locals => self.start_edit(),
             KeyCode::Char('.') => {

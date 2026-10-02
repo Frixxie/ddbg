@@ -124,8 +124,8 @@ saved between sessions. Press Tab for context-aware completion (aliases work too
 - `break`: file paths and source function names, including `src/file.rs:function`.
   Functions are scanned on first use, using the same discovery as the TUI picker.
 - `run`: file paths.
-- `test-run`, `test-debug`, `tests`: names from the most recently listed tests;
-  run/debug also complete test numbers. `test-debug` completes `-b` / `--break`.
+- `test-run`, `test-debug`, `tests`: names from the most recently listed tests.
+  `test-debug` completes `-b` / `--break`.
 - `print`, `eval`, `set`: expression completion from the debug adapter
   (`completions` request) in the selected frame, falling back to local
   variable names when the adapter does not support it.

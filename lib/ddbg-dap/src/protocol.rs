@@ -147,6 +147,8 @@ pub struct Variable {
     pub type_: Option<String>,
     #[serde(default)]
     pub variables_reference: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluate_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

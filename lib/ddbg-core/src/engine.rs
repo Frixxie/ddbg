@@ -521,11 +521,44 @@ impl Engine {
     }
 
     async fn value_reply(&mut self, eval: Evaluation) -> Result<Reply> {
-        let children = match eval.children {
+        let mut children = match eval.children {
             Some(r) => self.variables(r).await?,
             None => Vec::new(),
         };
+        self.describe(&mut children).await;
         Ok(Reply::Value(eval, children))
+    }
+
+    /// Replace values that only name their type (`{System.Guid}`) with
+    /// the result of `ToString()`, when the adapter can evaluate it.
+    async fn describe(&mut self, vars: &mut [Variable]) {
+        let frame_id = self.session.current_frame().map(|f| f.id.0);
+        for v in vars.iter_mut().filter(|v| v.is_opaque()) {
+            let Some(expr) = &v.evaluate_name else {
+                continue;
+            };
+            let Ok(client) = self.client() else {
+                return;
+            };
+            let Ok(resp) = client
+                .request(EvaluateArguments {
+                    expression: format!("({expr}).ToString()"),
+                    frame_id,
+                    context: Some("watch".into()),
+                })
+                .await
+            else {
+                continue;
+            };
+            let s = resp.result.trim();
+            let s = s
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(s);
+            if !s.is_empty() && Some(s) != v.type_name.as_deref() && s != v.value.trim() {
+                v.value = s.to_owned();
+            }
+        }
     }
 
     fn invalidate_variables(&mut self) {
@@ -734,7 +767,8 @@ impl Engine {
         }
         let mut out = Vec::new();
         for scope in scopes {
-            let variables = self.variables(scope.reference).await?;
+            let mut variables = self.variables(scope.reference).await?;
+            self.describe(&mut variables).await;
             out.push(ScopeVariables {
                 scope: scope.name,
                 reference: scope.reference,

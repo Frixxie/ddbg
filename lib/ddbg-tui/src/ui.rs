@@ -505,7 +505,14 @@ fn draw_value(f: &mut Frame, app: &mut App) {
     let block = block(&title, true);
     let inner = block.inner(rect);
     let [value, hint] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    let paragraph = Paragraph::new(variable.value.replace('\t', "    ")).wrap(Wrap { trim: false });
+    let mut text = variable.value.replace('\t', "    ");
+    for c in &app.value_children {
+        text.push_str(&format!("\n  {} = {}", c.name, c.value.replace('\n', " ")));
+        if let Some(t) = &c.type_name {
+            text.push_str(&format!("  ({t})"));
+        }
+    }
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
     let max_scroll = paragraph
         .line_count(value.width)
         .saturating_sub(value.height as usize)

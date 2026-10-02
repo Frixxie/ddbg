@@ -39,6 +39,18 @@ pub struct Variable {
     pub type_name: Option<String>,
     /// Set when the variable has children.
     pub children: Option<VarRef>,
+    /// Expression that evaluates to this variable, if the adapter knows it.
+    pub evaluate_name: Option<String>,
+}
+
+impl Variable {
+    /// Whether the value only names its type, e.g. .NET's `{System.Guid}`.
+    pub fn is_opaque(&self) -> bool {
+        let v = self.value.trim();
+        self.type_name
+            .as_deref()
+            .is_some_and(|t| v == t || v == format!("{{{t}}}"))
+    }
 }
 
 impl From<dap::Variable> for Variable {
@@ -48,6 +60,7 @@ impl From<dap::Variable> for Variable {
             value: v.value,
             type_name: v.type_.filter(|t| !t.is_empty()),
             children: VarRef::from_raw(v.variables_reference),
+            evaluate_name: v.evaluate_name.filter(|e| !e.is_empty()),
         }
     }
 }

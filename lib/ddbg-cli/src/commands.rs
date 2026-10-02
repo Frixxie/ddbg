@@ -91,11 +91,8 @@ impl DdbgCompleter {
                         }
                     }
                 }
-                for (i, name) in self.tests.lock().unwrap().iter().enumerate() {
+                for name in self.tests.lock().unwrap().iter() {
                     candidates.push(candidate(name.clone(), "Test".into(), span));
-                    if command != "tests" {
-                        candidates.push(candidate((i + 1).to_string(), name.clone(), span));
-                    }
                 }
             }
             "delete" | "thread" | "frame" => {
@@ -315,10 +312,7 @@ mod tests {
             assert_eq!(found[0].value, "parser::empty");
             assert_eq!(&line[found[0].span.start..found[0].span.end], "par");
         }
-        assert_eq!(
-            c.suggestions("td 2", 4)[0].description.as_deref(),
-            Some("a test with spaces")
-        );
+        assert!(c.suggestions("td 2", 4).is_empty());
         assert_eq!(c.suggestions("td --br", 7)[0].value, "--break");
         let line = "tr a test w";
         let found = c.suggestions(line, line.len());
