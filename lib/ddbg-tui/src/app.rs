@@ -571,6 +571,13 @@ impl App {
                 {
                     self.value_children = children.clone();
                 }
+                // The engine relaunches its last target (e.g. a debugged
+                // test) on `r`, so don't fall back to the program picker.
+                if let Reply::Launched(path) = &reply
+                    && self.program.is_none()
+                {
+                    self.program = Some(path.clone());
+                }
                 self.apply_reply(reply);
             }
             Outcome::Tests(tests) => match &mut self.picker {

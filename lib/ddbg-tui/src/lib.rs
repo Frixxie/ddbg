@@ -8,6 +8,7 @@
 //! report back through the same channel as terminal input and debugger
 //! events, so the screen stays responsive while a test builds.
 
+mod ansi;
 mod app;
 mod functions;
 mod highlight;

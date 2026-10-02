@@ -583,13 +583,14 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
     let lines: Vec<Line> = app.log[start..end]
         .iter()
         .map(|l| {
-            if l.starts_with("error:") {
-                Line::styled(l.as_str(), Style::new().fg(Color::Red))
+            let base = if l.starts_with("error:") {
+                Style::new().fg(Color::Red)
             } else if l.starts_with("ddbg> ") {
-                Line::styled(l.as_str(), Style::new().fg(Color::DarkGray))
+                Style::new().fg(Color::DarkGray)
             } else {
-                Line::raw(l.as_str())
-            }
+                Style::new()
+            };
+            crate::ansi::line(l, base)
         })
         .collect();
     f.render_widget(Paragraph::new(lines).block(block), area);
