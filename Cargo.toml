@@ -17,15 +17,15 @@ ddbg-test = { path = "lib/ddbg-test" }
 ddbg-tui = { path = "lib/ddbg-tui" }
 ddbg-driver = { path = "lib/ddbg-driver" }
 
-anyhow = "1"
-bytes = "1"
-clap = { version = "4", features = ["derive"] }
-ratatui = "0.30"
-reedline = { version = "0.52", features = ["external_printer"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "signal"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-directories = "6"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+anyhow = "1.0.104"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+ratatui = "0.30.2"
+reedline = { version = "0.52.0", features = ["external_printer"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+directories = "6.0.0"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
