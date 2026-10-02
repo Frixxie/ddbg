@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use ddbg_cli::render::exception_lines;
+use ddbg_cli::render::{elapsed_suffix, exception_lines};
 
 use crate::app::{App, Focus, Status};
 use crate::picker::{FilePicker, FunctionPicker, Picker, PickerItem, ProgramPicker, TestPicker};
@@ -283,10 +283,14 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
     let (text, color) = match app.status {
         Status::Idle => ("not started".to_owned(), Color::DarkGray),
         Status::Running => ("running".to_owned(), Color::Green),
-        Status::Stopped if app.exception.is_some() => {
-            ("stopped on exception".to_owned(), Color::Red)
-        }
-        Status::Stopped => ("stopped".to_owned(), Color::Yellow),
+        Status::Stopped if app.exception.is_some() => (
+            format!("stopped on exception{}", elapsed_suffix(app.elapsed)),
+            Color::Red,
+        ),
+        Status::Stopped => (
+            format!("stopped{}", elapsed_suffix(app.elapsed)),
+            Color::Yellow,
+        ),
         Status::Exited(code) => (format!("exited ({code})"), Color::Blue),
         Status::Terminated => ("terminated".to_owned(), Color::Blue),
     };

@@ -293,6 +293,7 @@ pub struct App {
     pub value_children: Vec<Variable>,
     /// Exception the debuggee is stopped on, if any.
     pub exception: Option<ExceptionInfo>,
+    pub elapsed: Option<std::time::Duration>,
     pub breakpoints: Vec<Breakpoint>,
 
     pub log: Vec<String>,
@@ -356,6 +357,7 @@ impl App {
             value_expr: None,
             value_children: Vec::new(),
             exception: None,
+            elapsed: None,
             breakpoints: Vec::new(),
             log: Vec::new(),
             log_scroll: 0,
@@ -442,6 +444,7 @@ impl App {
             DebugEvent::SessionStopped(info) => {
                 self.status = Status::Stopped;
                 self.exception = info.exception.clone();
+                self.elapsed = info.elapsed;
                 if let Some(frame) = &info.frame {
                     self.show_frame(frame);
                 }

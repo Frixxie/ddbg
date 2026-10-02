@@ -432,7 +432,7 @@ pub fn help(topic: Option<&str>) -> String {
 }
 
 /// ` (+12.3ms)`: time the debuggee ran before this stop.
-fn elapsed_suffix(elapsed: Option<Duration>) -> String {
+pub fn elapsed_suffix(elapsed: Option<Duration>) -> String {
     let Some(d) = elapsed else {
         return String::new();
     };
