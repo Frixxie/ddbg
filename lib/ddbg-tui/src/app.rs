@@ -6,12 +6,15 @@ use std::path::{Path, PathBuf};
 use ddbg_cli::Outcome;
 use ddbg_cli::commands::Suggestion;
 use ddbg_cli::parser::{Input, parse};
-use ddbg_cli::render::{Renderer, help};
+use ddbg_cli::render::{Renderer, elapsed_suffix, help};
 use ddbg_cli::testing::render_list;
-use ddbg_core::breakpoint::{Breakpoint, FunctionLocation, Location, SourceLocation, path_matches};
+use ddbg_core::breakpoint::{
+    Breakpoint, BreakpointId, FunctionLocation, Location, SourceLocation, path_matches,
+};
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::event::ExceptionInfo;
 use ddbg_core::frame::StackFrame;
+use ddbg_core::session::StopReason;
 use ddbg_core::variable::{VarRef, Variable};
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -157,6 +160,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn breakpoint_interval_sums_run_time_across_steps() {
+        use ddbg_core::event::StopInfo;
+        use std::time::Duration;
+        let mut app = test_app();
+        let stop = |reason, ms| {
+            DebugEvent::SessionStopped(Box::new(StopInfo {
+                reason,
+                thread: None,
+                description: None,
+                frame: None,
+                exception: None,
+                elapsed: Some(Duration::from_millis(ms)),
+            }))
+        };
+        app.debug_event(DebugEvent::SessionStarted);
+        app.debug_event(stop(StopReason::Breakpoint(vec![BreakpointId(1)]), 5));
+        assert_eq!(app.bp_interval, None);
+        app.debug_event(stop(StopReason::Step, 3));
+        app.debug_event(stop(StopReason::Breakpoint(vec![BreakpointId(2)]), 7));
+        assert_eq!(
+            app.bp_interval,
+            Some(BpInterval {
+                from: BreakpointId(1),
+                to: BreakpointId(2),
+                time: Duration::from_millis(10),
+            })
+        );
+        app.debug_event(DebugEvent::SessionStarted);
+        assert_eq!(app.bp_interval, None);
+    }
+
+    #[tokio::test]
     async fn edit_local_value() {
         let mut app = test_app();
         let key = |app: &mut App, code| app.key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -241,6 +276,14 @@ impl Focus {
     }
 }
 
+/// Debuggee run time between two consecutive breakpoint hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BpInterval {
+    pub from: BreakpointId,
+    pub to: BreakpointId,
+    pub time: std::time::Duration,
+}
+
 /// Coarse status for the title bar, derived from events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -294,6 +337,10 @@ pub struct App {
     /// Exception the debuggee is stopped on, if any.
     pub exception: Option<ExceptionInfo>,
     pub elapsed: Option<std::time::Duration>,
+    /// Last breakpoint hit and debuggee run time accumulated since.
+    last_hit: Option<(BreakpointId, std::time::Duration)>,
+    /// Run time between the previous and the current breakpoint hit.
+    pub bp_interval: Option<BpInterval>,
     pub breakpoints: Vec<Breakpoint>,
 
     pub log: Vec<String>,
@@ -358,6 +405,8 @@ impl App {
             value_children: Vec::new(),
             exception: None,
             elapsed: None,
+            last_hit: None,
+            bp_interval: None,
             breakpoints: Vec::new(),
             log: Vec::new(),
             log_scroll: 0,
@@ -437,7 +486,13 @@ impl App {
             self.log(text);
         }
         match &event {
-            DebugEvent::SessionStarted | DebugEvent::SessionContinued => {
+            DebugEvent::SessionStarted => {
+                self.status = Status::Running;
+                self.last_hit = None;
+                self.bp_interval = None;
+                self.clear_stopped();
+            }
+            DebugEvent::SessionContinued => {
                 self.status = Status::Running;
                 self.clear_stopped();
             }
@@ -445,6 +500,7 @@ impl App {
                 self.status = Status::Stopped;
                 self.exception = info.exception.clone();
                 self.elapsed = info.elapsed;
+                self.track_breakpoint_interval(&info.reason, info.elapsed);
                 if let Some(frame) = &info.frame {
                     self.show_frame(frame);
                 }
@@ -470,6 +526,36 @@ impl App {
             DebugEvent::BreakpointChanged(_) => self.refresh_breakpoints(),
             DebugEvent::ThreadsChanged | DebugEvent::Output(_) => {}
         }
+    }
+
+    /// Sum run time across stops so that stepping between two breakpoints
+    /// does not reset the measurement or count time spent paused.
+    fn track_breakpoint_interval(
+        &mut self,
+        reason: &StopReason,
+        elapsed: Option<std::time::Duration>,
+    ) {
+        if let Some((_, total)) = &mut self.last_hit {
+            *total += elapsed.unwrap_or_default();
+        }
+        let StopReason::Breakpoint(hit) = reason else {
+            return;
+        };
+        let Some(&to) = hit.first() else {
+            return;
+        };
+        self.bp_interval = self
+            .last_hit
+            .map(|(from, time)| BpInterval { from, to, time });
+        if let Some(i) = self.bp_interval {
+            self.log(format!(
+                "breakpoint {} → {}{}",
+                i.from,
+                i.to,
+                elapsed_suffix(Some(i.time))
+            ));
+        }
+        self.last_hit = Some((to, std::time::Duration::ZERO));
     }
 
     fn outcome(&mut self, outcome: Outcome, silent: bool) {

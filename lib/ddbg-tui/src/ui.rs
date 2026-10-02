@@ -299,6 +299,14 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(text, Style::new().fg(color).bold()),
     ];
+    if app.status == Status::Stopped
+        && let Some(i) = &app.bp_interval
+    {
+        spans.push(Span::styled(
+            format!("  bp {} → {}{}", i.from, i.to, elapsed_suffix(Some(i.time))),
+            Style::new().fg(Color::Magenta),
+        ));
+    }
     if let Some(program) = &app.program {
         let name = program.strip_prefix(&app.cwd).unwrap_or(program).display();
         spans.push(Span::styled(
