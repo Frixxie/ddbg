@@ -458,6 +458,7 @@ dependencies = [
  "directories",
  "reedline",
  "serde_json",
+ "syntect",
  "tokio",
  "tracing",
  "tracing-subscriber",

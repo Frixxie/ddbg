@@ -21,12 +21,15 @@ const SOURCE_CONTEXT: usize = 2;
 pub struct Renderer {
     cwd: PathBuf,
     sources: HashMap<PathBuf, Option<Vec<String>>>,
+    highlighted: HashMap<PathBuf, Vec<String>>,
     last_function: Option<String>,
     exited: bool,
     /// Partial output lines per category.
     pending_output: HashMap<u8, String>,
     /// Show adapter console messages (debugger chatter).
     pub show_console: bool,
+    /// Syntax-highlight source listings with ANSI escapes.
+    pub color: bool,
 }
 
 impl Renderer {
@@ -34,10 +37,12 @@ impl Renderer {
         Self {
             cwd,
             sources: HashMap::new(),
+            highlighted: HashMap::new(),
             last_function: None,
             exited: false,
             pending_output: HashMap::new(),
             show_console: false,
+            color: false,
         }
     }
 
@@ -64,12 +69,31 @@ impl Renderer {
         let start = current.saturating_sub(SOURCE_CONTEXT);
         let end = (current + SOURCE_CONTEXT + 1).min(lines.len());
         let width = end.to_string().len();
+        let lines = if self.color {
+            &*self
+                .highlighted
+                .entry(path.to_path_buf())
+                .or_insert_with(|| crate::highlight::highlight(path, lines))
+        } else {
+            lines
+        };
         let out: Vec<String> = (start..end)
             .map(|i| {
                 let marker = if i == current { '>' } else { ' ' };
-                format!("{:>width$} {marker} {}", i + 1, lines[i].trim_end())
-                    .trim_end()
-                    .to_owned()
+                let text = lines[i].trim_end();
+                if self.color {
+                    let gutter = format!("{:>width$} {marker}", i + 1);
+                    let gutter = if i == current {
+                        format!("\x1b[1;33m{gutter}\x1b[0m")
+                    } else {
+                        format!("\x1b[2m{gutter}\x1b[0m")
+                    };
+                    format!("{gutter} {text}")
+                } else {
+                    format!("{:>width$} {marker} {text}", i + 1)
+                        .trim_end()
+                        .to_owned()
+                }
             })
             .collect();
         Some(out.join("\n"))

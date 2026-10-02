@@ -89,6 +89,8 @@ pub async fn run(session: Session, initial: Vec<Command>, verbose: bool) -> anyh
     let out = printer.sender();
     let mut renderer = Renderer::new(session.cwd.clone());
     renderer.show_console = verbose;
+    renderer.color = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::env::var_os("NO_COLOR").is_none();
     let renderer = Arc::new(Mutex::new(renderer));
 
     // Async debugger events → printer.

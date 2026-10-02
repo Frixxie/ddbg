@@ -4,6 +4,7 @@ mod adapter_test;
 mod args;
 pub mod commands;
 pub mod functions;
+mod highlight;
 mod logging;
 pub mod parser;
 pub mod render;
