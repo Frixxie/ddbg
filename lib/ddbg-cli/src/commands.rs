@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ddbg_core::{EngineHandle, Reply, command::Command};
-use reedline::{Completer, CompletionResult, Span, Suggestion};
+use reedline::{Completer, CompletionResult};
+pub use reedline::{Span, Suggestion};
 
 use crate::parser::{COMMANDS, lookup};
 
@@ -30,6 +31,15 @@ impl DdbgCompleter {
         let Some(command) = lookup(command).map(|c| c.name) else {
             return Vec::new();
         };
+        if let Some((offset, query)) = expression_query(line, pos) {
+            let result = self.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(500), self.engine.execute(query)).await
+            });
+            return match result {
+                Ok(Ok(reply)) => expression_suggestions(line, offset, reply),
+                _ => Vec::new(),
+            };
+        }
         let start = pos - rest.trim_start().len();
         let mut span = Span::new(start, pos);
         let mut prefix = &before[start..];
@@ -88,12 +98,11 @@ impl DdbgCompleter {
                     }
                 }
             }
-            "delete" | "thread" | "frame" | "print" => {
+            "delete" | "thread" | "frame" => {
                 let query = match command {
                     "delete" => Command::Breakpoints,
                     "thread" => Command::Threads,
-                    "frame" => Command::Backtrace,
-                    _ => Command::Locals,
+                    _ => Command::Backtrace,
                 };
                 if let Ok(Ok(reply)) = self.runtime.block_on(async {
                     tokio::time::timeout(Duration::from_millis(500), self.engine.execute(query))
@@ -111,6 +120,56 @@ impl DdbgCompleter {
         candidates.dedup_by(|a, b| a.value == b.value);
         candidates
     }
+}
+
+/// For `print`/`eval`/`set` lines, the byte offset where the expression
+/// starts and the engine query that completes it at `pos`.
+pub fn expression_query(line: &str, pos: usize) -> Option<(usize, Command)> {
+    let before = line.get(..pos)?;
+    let trimmed = before.trim_start();
+    let (word, rest) = trimmed.split_once(char::is_whitespace)?;
+    let rest = match lookup(word)?.name {
+        "print" | "eval" => rest.trim_start(),
+        "set" => crate::parser::set_body(rest.trim_start()),
+        _ => return None,
+    };
+    let offset = pos - rest.len();
+    let text = line[offset..].to_owned();
+    Some((
+        offset,
+        Command::Complete {
+            column: rest.chars().count(),
+            text,
+        },
+    ))
+}
+
+/// Turn a [`Reply::Completions`] for an expression starting at byte
+/// `offset` of `line` into suggestions spanning the whole line.
+pub fn expression_suggestions(line: &str, offset: usize, reply: Reply) -> Vec<Suggestion> {
+    let Reply::Completions(items) = reply else {
+        return Vec::new();
+    };
+    let expr = &line[offset..];
+    let byte = |chars: usize| {
+        offset
+            + expr
+                .char_indices()
+                .nth(chars)
+                .map_or(expr.len(), |(i, _)| i)
+    };
+    let mut out: Vec<Suggestion> = items
+        .into_iter()
+        .map(|c| Suggestion {
+            value: c.text,
+            description: c.kind.filter(|k| !k.is_empty()),
+            span: Span::new(byte(c.start), byte(c.start + c.length)),
+            append_whitespace: false,
+            ..Default::default()
+        })
+        .collect();
+    out.dedup_by(|a, b| a.value == b.value && a.span == b.span);
+    out
 }
 
 fn candidate(value: String, description: String, span: Span) -> Suggestion {
@@ -137,11 +196,6 @@ fn reply_candidates(reply: Reply, span: Span) -> Vec<Suggestion> {
             .into_iter()
             .enumerate()
             .map(|(i, f)| candidate(i.to_string(), f.name, span))
-            .collect(),
-        Reply::Locals(scopes) => scopes
-            .into_iter()
-            .flat_map(|s| s.variables)
-            .map(|v| candidate(v.name, v.type_name.unwrap_or_default(), span))
             .collect(),
         _ => Vec::new(),
     }
@@ -337,22 +391,44 @@ mod tests {
     }
 
     #[test]
-    fn local_variables_keep_names_and_type_descriptions() {
-        let found = reply_candidates(
-            Reply::Locals(vec![ddbg_core::command::ScopeVariables {
-                scope: "Locals".into(),
-                variables: vec![ddbg_core::variable::Variable {
-                    name: "point".into(),
-                    value: "{x: 3}".into(),
-                    type_name: Some("Point".into()),
-                    children: None,
-                }],
+    fn expression_queries_skip_command_and_set_var() {
+        let q = |l: &str| expression_query(l, l.len());
+        assert_eq!(
+            q("p po"),
+            Some((
+                2,
+                Command::Complete {
+                    text: "po".into(),
+                    column: 2
+                }
+            ))
+        );
+        let Some((off, Command::Complete { text, column })) = q("set var p.x = y") else {
+            panic!()
+        };
+        assert_eq!((off, text.as_str(), column), (8, "p.x = y", 7));
+        assert!(q("b foo").is_none());
+        assert!(q("print").is_none());
+    }
+
+    #[test]
+    fn expression_completions_map_to_line_spans() {
+        use ddbg_core::command::Completion;
+        let line = "p é.po";
+        let found = expression_suggestions(
+            line,
+            2,
+            Reply::Completions(vec![Completion {
+                label: "point".into(),
+                text: "point".into(),
+                kind: Some("Point".into()),
+                start: 2,
+                length: 2,
             }]),
-            Span::new(2, 4),
         );
         assert_eq!(found[0].value, "point");
         assert_eq!(found[0].description.as_deref(), Some("Point"));
-        assert_eq!(found[0].span, Span::new(2, 4));
+        assert_eq!(&line[found[0].span.start..found[0].span.end], "po");
     }
 
     fn values(line: &str) -> Vec<String> {

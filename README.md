@@ -112,6 +112,8 @@ Process exited normally.
 | `threads` / `thread <id>` | | List / select threads |
 | `frame [n]`, `up`, `down` | `f` | Select or show a stack frame |
 | `print <expr>` | `p` | Evaluate an expression |
+| `eval <expr>` | `e` | Evaluate in the adapter's REPL context (may have side effects, e.g. debugger console commands) |
+| `set [var] <lvalue> = <value>` | | Assign a value, e.g. `set point.x = 42` |
 | `locals` | | Show local variables |
 | `help [command]` | `h` | Show help |
 | `quit` | `q` | Exit (also Ctrl-D) |
@@ -124,7 +126,9 @@ saved between sessions. Press Tab for context-aware completion (aliases work too
 - `run`: file paths.
 - `test-run`, `test-debug`, `tests`: names from the most recently listed tests;
   run/debug also complete test numbers. `test-debug` completes `-b` / `--break`.
-- `print`: local variable names in the selected frame while stopped.
+- `print`, `eval`, `set`: expression completion from the debug adapter
+  (`completions` request) in the selected frame, falling back to local
+  variable names when the adapter does not support it.
 - `delete`: existing breakpoint IDs; `thread`: thread IDs; `frame`: stack indices.
 - Command names and `help` topics.
 
@@ -170,7 +174,8 @@ The screen is divided into these areas:
 
 Press `?` to list the keys. Press `:` to enter any REPL command, such as
 `:break src/main.rs:14` or `:print point`. Up/Down browse command history,
-which is not saved between sessions.
+which is not saved between sessions. Tab completes like the REPL; with
+several matches a list opens and Tab / Shift-Tab cycle through it.
 
 | Key | Action |
 |---|---|
@@ -187,6 +192,7 @@ which is not saved between sessions.
 | `b`, F9 | Toggle breakpoint at the cursor line |
 | `u` / `d` | Frame up / down |
 | Enter | Select the highlighted frame (stack pane) or view a variable's value (locals pane) |
+| `=` | Edit the selected variable's value (locals pane) |
 | `.` | Jump to the execution point |
 | Tab | Cycle focus: source, stack, locals, output |
 | `j`/`k`, Up/Down, PageUp/PageDown, `g`/`G` | Move / scroll |
@@ -197,7 +203,13 @@ which is not saved between sessions.
 In the locals pane, select a variable with Up/Down or `j`/`k` and press
 Enter to view its name, type, and full value supplied by the debugger.
 Long values wrap in the popup; use Up/Down, PageUp/PageDown, or `g`/`G`
-to scroll. Press Esc or Enter to close it.
+to scroll. Press Esc or Enter to close it. Press `=` to edit the selected
+variable: the bottom line shows `set <name> = <value>`; Enter assigns the new
+value and Esc cancels.
+
+`set` uses the adapter's `setExpression` request when available, otherwise
+`setVariable`; with `setVariable`, members (`a.b`, `a->b`, `a[2]`) are
+resolved through their parent, so `set point.x = 1` works with `lldb-dap`.
 
 ### Pickers
 

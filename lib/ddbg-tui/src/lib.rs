@@ -37,6 +37,11 @@ pub(crate) enum Msg {
     EventsLagged(u64),
     /// Result of function discovery.
     Functions(Vec<functions::Function>),
+    /// Completions for the command line `line`.
+    Completions {
+        line: String,
+        items: Vec<ddbg_cli::commands::Suggestion>,
+    },
 }
 
 /// Spawns commands without blocking the UI.
@@ -65,6 +70,32 @@ impl Executor {
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
             let _ = tx.send(Msg::Functions(functions::discover(&root)));
+        });
+    }
+
+    /// Complete the command line `line` (cursor at its end) off the UI
+    /// thread. Expressions query the engine directly so a long-running
+    /// command holding the session does not block completion.
+    pub(crate) fn complete(&self, engine: &ddbg_core::EngineHandle, line: String) {
+        use ddbg_cli::commands::{expression_query, expression_suggestions, suggestions};
+        let tx = self.tx.clone();
+        let Some((offset, query)) = expression_query(&line, line.len()) else {
+            let items = suggestions(&line, line.len());
+            let _ = tx.send(Msg::Completions { line, items });
+            return;
+        };
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let items = match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                engine.execute(query),
+            )
+            .await
+            {
+                Ok(Ok(reply)) => expression_suggestions(&line, offset, reply),
+                _ => Vec::new(),
+            };
+            let _ = tx.send(Msg::Completions { line, items });
         });
     }
 

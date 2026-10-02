@@ -915,6 +915,9 @@ pub enum Command {
     Frame(FrameSelector),
 
     Print(String),
+    Eval(String),
+    Set { target: String, value: String },
+    Complete { text: String, column: usize },
     Locals,
 
     Tests(TestQuery),
@@ -960,6 +963,8 @@ threads
 frame <n>
 
 print <expression>
+eval <expression>
+set [var] <lvalue> = <value>
 locals
 
 tests [filter]
@@ -982,6 +987,7 @@ fin   finish
 b     break
 bt    backtrace
 p     print
+e     eval
 
 tr    test-run
 td    test-debug

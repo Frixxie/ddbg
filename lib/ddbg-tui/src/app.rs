@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ddbg_cli::Outcome;
+use ddbg_cli::commands::Suggestion;
 use ddbg_cli::parser::{Input, parse};
 use ddbg_cli::render::{Renderer, help};
 use ddbg_cli::testing::render_list;
@@ -11,7 +12,7 @@ use ddbg_core::breakpoint::{Breakpoint, FunctionLocation, Location, SourceLocati
 use ddbg_core::command::{Command, FrameSelector, Reply, ScopeVariables, TestQuery, TestSelector};
 use ddbg_core::event::ExceptionInfo;
 use ddbg_core::frame::StackFrame;
-use ddbg_core::variable::Variable;
+use ddbg_core::variable::{VarRef, Variable};
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -29,6 +30,39 @@ pub enum Focus {
     Stack,
     Locals,
     Log,
+}
+
+/// Inline editor for a local variable's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditVar {
+    pub scope: VarRef,
+    pub name: String,
+    pub value: String,
+}
+
+/// Open completion list for the command line.
+#[derive(Debug, Clone)]
+pub struct CompletionList {
+    /// Command line the completions were computed for.
+    pub base: String,
+    pub items: Vec<Suggestion>,
+    pub index: usize,
+}
+
+impl CompletionList {
+    /// `base` with the selected completion applied.
+    fn applied(&self) -> String {
+        let s = &self.items[self.index];
+        let (start, end) = (
+            s.span.start.min(self.base.len()),
+            s.span.end.min(self.base.len()),
+        );
+        let mut line = format!("{}{}{}", &self.base[..start], s.value, &self.base[end..]);
+        if s.append_whitespace {
+            line.push(' ');
+        }
+        line
+    }
 }
 
 #[cfg(test)]
@@ -64,6 +98,7 @@ mod tests {
             (0..2)
                 .map(|i| ScopeVariables {
                     scope: format!("scope {i}"),
+                    reference: VarRef(i + 1),
                     variables: vec![Variable {
                         name: format!("var{i}"),
                         value: format!("first line\n{}\nlast line", "long value ".repeat(300)),
@@ -98,6 +133,98 @@ mod tests {
         assert!(app.selected_local().is_none());
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.value_scroll, None);
+    }
+
+    fn test_app() -> App {
+        let cwd = PathBuf::from(".");
+        let engine = engine::spawn(EngineConfig {
+            adapter: Arc::new(LldbDapAdapter::default()),
+            cwd: cwd.clone(),
+            target: None,
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let exec = Executor {
+            session: Arc::new(Mutex::new(ddbg_cli::Session {
+                engine: engine.clone(),
+                cwd: cwd.clone(),
+                candidates: Vec::new(),
+                tests: ddbg_cli::testing::Tests::new(None, ""),
+            })),
+            tx,
+        };
+        App::new(exec, engine, cwd, false, Vec::new(), None)
+    }
+
+    #[tokio::test]
+    async fn edit_local_value() {
+        let mut app = test_app();
+        let key = |app: &mut App, code| app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.apply_reply(Reply::Locals(vec![ScopeVariables {
+            scope: "Locals".into(),
+            reference: VarRef(7),
+            variables: vec![Variable {
+                name: "x".into(),
+                value: "1".into(),
+                type_name: None,
+                children: None,
+            }],
+        }]));
+        app.focus = Focus::Locals;
+        key(&mut app, KeyCode::Char('='));
+        assert_eq!(app.edit.as_ref().unwrap().value, "1");
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Char('4'));
+        key(&mut app, KeyCode::Char('2'));
+        assert_eq!(
+            app.edit_command(),
+            Some(Command::SetVariable {
+                scope: VarRef(7),
+                name: "x".into(),
+                value: "42".into(),
+            })
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.edit.is_none());
+    }
+
+    #[tokio::test]
+    async fn command_line_completion_applies_and_cycles() {
+        use ddbg_cli::commands::Span;
+        let mut app = test_app();
+        let key = |app: &mut App, code| app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        key(&mut app, KeyCode::Char(':'));
+        for c in "p po".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        let item = |v: &str| Suggestion {
+            value: v.into(),
+            span: Span::new(2, 4),
+            ..Default::default()
+        };
+        app.handle(Msg::Completions {
+            line: "p po".into(),
+            items: vec![item("point")],
+        });
+        assert_eq!(app.input.as_deref(), Some("p point"));
+        assert!(app.completions.is_none());
+
+        app.input = Some("p po".into());
+        app.handle(Msg::Completions {
+            line: "p po".into(),
+            items: vec![item("point"), item("pos")],
+        });
+        assert_eq!(app.input.as_deref(), Some("p point"));
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.input.as_deref(), Some("p pos"));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.completions.is_none());
+        assert_eq!(app.input.as_deref(), Some("p posx"));
+        // Stale results for an edited line are ignored.
+        app.handle(Msg::Completions {
+            line: "p po".into(),
+            items: vec![item("point")],
+        });
+        assert_eq!(app.input.as_deref(), Some("p posx"));
     }
 }
 
@@ -168,6 +295,10 @@ pub struct App {
 
     /// Command line contents while in command mode.
     pub input: Option<String>,
+    /// Open completion list for `input`.
+    pub completions: Option<CompletionList>,
+    /// Inline value editor for a local variable.
+    pub edit: Option<EditVar>,
     history: Vec<String>,
     history_pos: Option<usize>,
 
@@ -219,6 +350,8 @@ impl App {
             log: Vec::new(),
             log_scroll: 0,
             input: None,
+            completions: None,
+            edit: None,
             history: Vec::new(),
             history_pos: None,
             picker: None,
@@ -281,6 +414,7 @@ impl App {
                     picker.set_items(fns);
                 }
             }
+            Msg::Completions { line, items } => self.show_completions(line, items),
             Msg::EventsLagged(n) => self.log(format!("warning: dropped {n} debugger events")),
         }
     }
@@ -318,6 +452,7 @@ impl App {
                 self.value_scroll = None;
                 self.refresh_stopped();
             }
+            DebugEvent::VariablesChanged => self.execute_silent(Command::Locals),
             DebugEvent::BreakpointChanged(_) => self.refresh_breakpoints(),
             DebugEvent::ThreadsChanged | DebugEvent::Output(_) => {}
         }
@@ -485,6 +620,10 @@ impl App {
             self.exec.pause(&self.engine);
             return;
         }
+        if self.edit.is_some() {
+            self.edit_key(key);
+            return;
+        }
         if self.input.is_some() {
             self.command_key(key);
             return;
@@ -559,6 +698,7 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Locals && self.selected_local().is_some() => {
                 self.value_scroll = Some(0);
             }
+            KeyCode::Char('=') if self.focus == Focus::Locals => self.start_edit(),
             KeyCode::Char('.') => {
                 // Jump back to the execution point.
                 if let Some(frame) = self.selected_frame.and_then(|i| self.stack.get(i)).cloned() {
@@ -734,6 +874,26 @@ impl App {
     }
 
     fn command_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+            let back = key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+            match &mut self.completions {
+                Some(list) => {
+                    let n = list.items.len();
+                    list.index = if back {
+                        (list.index + n - 1) % n
+                    } else {
+                        (list.index + 1) % n
+                    };
+                    self.input = Some(list.applied());
+                }
+                None => {
+                    let line = self.input.clone().unwrap_or_default();
+                    self.exec.complete(&self.engine, line);
+                }
+            }
+            return;
+        }
+        self.completions = None;
         let Some(input) = self.input.as_mut() else {
             return;
         };
@@ -751,6 +911,77 @@ impl App {
             KeyCode::Up => self.history_step(-1),
             KeyCode::Down => self.history_step(1),
             KeyCode::Char(c) => input.push(c),
+            _ => {}
+        }
+    }
+
+    /// Apply completion results if the command line has not changed since.
+    fn show_completions(&mut self, line: String, items: Vec<Suggestion>) {
+        if self.input.as_deref() != Some(line.as_str()) || items.is_empty() {
+            return;
+        }
+        let list = CompletionList {
+            base: line,
+            items,
+            index: 0,
+        };
+        self.input = Some(list.applied());
+        self.completions = (list.items.len() > 1).then_some(list);
+    }
+
+    fn start_edit(&mut self) {
+        let Some(v) = self.selected_local().cloned() else {
+            return;
+        };
+        let Some(scope) = self
+            .locals
+            .iter()
+            .scan(0, |n, s| {
+                *n += s.variables.len();
+                Some((*n, s.reference))
+            })
+            .find(|(end, _)| self.locals_cursor < *end)
+            .map(|(_, r)| r)
+        else {
+            return;
+        };
+        self.edit = Some(EditVar {
+            scope,
+            name: v.name,
+            value: v.value,
+        });
+    }
+
+    pub fn edit_command(&self) -> Option<Command> {
+        let e = self.edit.as_ref()?;
+        Some(Command::SetVariable {
+            scope: e.scope,
+            name: e.name.clone(),
+            value: e.value.trim().to_owned(),
+        })
+    }
+
+    fn edit_key(&mut self, key: KeyEvent) {
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.edit = None,
+            KeyCode::Enter => {
+                let Some(cmd) = self.edit_command() else {
+                    return;
+                };
+                let name = self.edit.take().map(|e| e.name).unwrap_or_default();
+                if let Command::SetVariable { value, .. } = &cmd {
+                    self.log(format!("ddbg> set {name} = {value}"));
+                }
+                self.log_scroll = 0;
+                self.execute(cmd);
+            }
+            KeyCode::Backspace => {
+                edit.value.pop();
+            }
+            KeyCode::Char(c) => edit.value.push(c),
             _ => {}
         }
     }

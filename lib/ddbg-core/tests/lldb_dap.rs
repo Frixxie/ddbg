@@ -100,6 +100,32 @@ async fn debug_rust_executable() {
     };
     assert_eq!(children.len(), 2, "{v:?} {children:?}");
 
+    let set = |target: &str, value: &str| Command::Set {
+        target: target.into(),
+        value: value.into(),
+    };
+    let Reply::Value(v, _) = e.execute(set("point.x", "42")).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(v.value, "42");
+    let Reply::Value(v, _) = e.execute(Command::Print("point.x".into())).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(v.value, "42");
+    e.execute(set("point.x", "3")).await.unwrap();
+
+    let Reply::Completions(items) = e
+        .execute(Command::Complete {
+            text: "poi".into(),
+            column: 3,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(items.iter().any(|c| c.text == "point"), "{items:?}");
+
     // Step into `add`, check the backtrace, then step out.
     e.execute(Command::Step).await.unwrap();
     let DebugEvent::SessionStopped(info) =

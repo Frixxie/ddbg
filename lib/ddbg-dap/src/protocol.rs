@@ -174,6 +174,8 @@ pub struct Capabilities {
     #[serde(default)]
     pub supports_set_variable: bool,
     #[serde(default)]
+    pub supports_set_expression: bool,
+    #[serde(default)]
     pub supports_restart_frame: bool,
     #[serde(default)]
     pub supports_goto_targets_request: bool,
@@ -408,6 +410,78 @@ pub struct EvaluateResponse {
     pub variables_reference: i64,
 }
 request!(EvaluateArguments, "evaluate", EvaluateResponse);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetVariableArguments {
+    pub variables_reference: i64,
+    pub name: String,
+    pub value: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetVariableResponse {
+    pub value: String,
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    #[serde(default)]
+    pub variables_reference: i64,
+}
+request!(SetVariableArguments, "setVariable", SetVariableResponse);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExpressionArguments {
+    pub expression: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<i64>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExpressionResponse {
+    pub value: String,
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    #[serde(default)]
+    pub variables_reference: i64,
+}
+request!(
+    SetExpressionArguments,
+    "setExpression",
+    SetExpressionResponse
+);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionsArguments {
+    pub text: String,
+    /// 1-based, in UTF-16 code units by default.
+    pub column: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<i64>,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompletionsResponse {
+    pub targets: Vec<CompletionItem>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionItem {
+    pub label: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// 0-based start of the text to replace (DAP spec: in client column units).
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub length: Option<i64>,
+}
+request!(CompletionsArguments, "completions", CompletionsResponse);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

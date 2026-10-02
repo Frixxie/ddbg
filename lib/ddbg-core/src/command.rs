@@ -5,7 +5,7 @@ pub use crate::breakpoint::{FunctionLocation, Location};
 use crate::frame::StackFrame;
 use crate::target::LaunchTarget;
 use crate::thread::{Thread, ThreadId};
-use crate::variable::{Evaluation, Variable};
+use crate::variable::{Evaluation, VarRef, Variable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -29,6 +29,24 @@ pub enum Command {
     Frame(FrameSelector),
 
     Print(String),
+    /// Evaluate in the adapter's REPL context (may have side effects).
+    Eval(String),
+    /// Assign `value` to the l-value expression `target`.
+    Set {
+        target: String,
+        value: String,
+    },
+    /// Assign `value` to the variable `name` inside container `scope`.
+    SetVariable {
+        scope: VarRef,
+        name: String,
+        value: String,
+    },
+    /// Complete an expression; `column` is a 0-based char offset in `text`.
+    Complete {
+        text: String,
+        column: usize,
+    },
     Locals,
 
     Tests(TestQuery),
@@ -91,11 +109,24 @@ pub enum Reply {
     /// An evaluated expression and (one level of) its children.
     Value(Evaluation, Vec<Variable>),
     Locals(Vec<ScopeVariables>),
+    Completions(Vec<Completion>),
     Quit,
+}
+
+/// An expression completion. `start`/`length` are char offsets into the
+/// completed text describing what to replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub label: String,
+    pub text: String,
+    pub kind: Option<String>,
+    pub start: usize,
+    pub length: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeVariables {
     pub scope: String,
+    pub reference: VarRef,
     pub variables: Vec<Variable>,
 }

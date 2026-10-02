@@ -78,6 +78,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         "print <expression>",
         "Evaluate an expression",
     ),
+    spec(
+        "eval",
+        &["e"],
+        "eval <expression>",
+        "Evaluate in the adapter's REPL context (may have side effects)",
+    ),
+    spec(
+        "set",
+        &[],
+        "set [var] <lvalue> = <value>",
+        "Assign a value to a variable or expression",
+    ),
     spec("locals", &[], "locals", "Show local variables"),
     spec("tests", &[], "tests [filter]", "Discover and number tests"),
     spec(
@@ -181,6 +193,20 @@ pub fn parse(line: &str) -> Result<Input, String> {
             }
             Ok(Input::Command(Command::Print(rest.to_owned())))
         }
+        "eval" => {
+            if rest.is_empty() {
+                return Err(usage());
+            }
+            Ok(Input::Command(Command::Eval(rest.to_owned())))
+        }
+        "set" => {
+            let rest = set_body(rest);
+            let (target, value) = split_assignment(rest).ok_or_else(usage)?;
+            Ok(Input::Command(Command::Set {
+                target: target.to_owned(),
+                value: value.to_owned(),
+            }))
+        }
         "locals" => no_args(Command::Locals),
         "tests" => Ok(Input::Command(Command::Tests(TestQuery {
             filter: (!rest.is_empty()).then(|| rest.to_owned()),
@@ -241,6 +267,42 @@ fn split_location(s: &str) -> Option<(&str, &str)> {
         .rev()
         .find(|&i| b[i] == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':'))
         .map(|i| (&s[..i], &s[i + 1..]))
+}
+
+/// Strip gdb's optional `var`/`variable` keyword from a `set` command.
+pub fn set_body(rest: &str) -> &str {
+    for kw in ["variable", "var"] {
+        if let Some(r) = rest.strip_prefix(kw)
+            && r.starts_with(char::is_whitespace)
+        {
+            return r.trim_start();
+        }
+    }
+    rest
+}
+
+/// Split `lhs = rhs` at the first `=` that is not part of a comparison
+/// operator or inside quotes. Both sides must be non-empty.
+pub fn split_assignment(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let mut quote = None;
+    for i in 0..b.len() {
+        match (quote, b[i]) {
+            (Some(q), c) if c == q && b.get(i.wrapping_sub(1)) != Some(&b'\\') => quote = None,
+            (Some(_), _) => {}
+            (None, b'"' | b'\'') => quote = Some(b[i]),
+            (None, b'=') => {
+                let prev = i.checked_sub(1).map(|j| b[j]);
+                if b.get(i + 1) == Some(&b'=') || matches!(prev, Some(b'=' | b'!' | b'<' | b'>')) {
+                    continue;
+                }
+                let (lhs, rhs) = (s[..i].trim(), s[i + 1..].trim());
+                return (!lhs.is_empty() && !rhs.is_empty()).then_some((lhs, rhs));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_test_selector(s: &str) -> Option<TestSelector> {
@@ -394,6 +456,23 @@ mod tests {
             cmd("tr parser::tests::x"),
             Command::TestRun(TestSelector::Name("parser::tests::x".into()))
         );
+    }
+
+    #[test]
+    fn parses_set_and_eval() {
+        let set = |t: &str, v: &str| Command::Set {
+            target: t.into(),
+            value: v.into(),
+        };
+        assert_eq!(cmd("set x = 5"), set("x", "5"));
+        assert_eq!(cmd("set var p.x=a == b"), set("p.x", "a == b"));
+        assert_eq!(cmd("set variable a[i] = \"=\""), set("a[i]", "\"=\""));
+        assert_eq!(cmd("set vary = 1"), set("vary", "1"));
+        assert!(parse("set x").is_err());
+        assert!(parse("set x == 1").is_err());
+        assert!(parse("set = 1").is_err());
+        assert_eq!(cmd("e x += 1"), Command::Eval("x += 1".into()));
+        assert!(parse("eval").is_err());
     }
 
     #[test]

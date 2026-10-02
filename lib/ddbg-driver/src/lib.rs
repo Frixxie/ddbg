@@ -36,7 +36,7 @@ use ddbg_cli::testing::{Tests, render_list};
 use ddbg_cli::{Args, Outcome, Parser, Session};
 use ddbg_core::breakpoint::{Breakpoint, BreakpointId, FunctionLocation, SourceLocation};
 use ddbg_core::command::{
-    Command, FrameSelector, Location, Reply, ScopeVariables, TestQuery, TestSelector,
+    Command, Completion, FrameSelector, Location, Reply, ScopeVariables, TestQuery, TestSelector,
 };
 use ddbg_core::event::{OutputCategory, StopInfo};
 use ddbg_core::frame::StackFrame;
@@ -386,6 +386,38 @@ impl Debugger {
     pub async fn print_with_children(&mut self, expr: &str) -> Result<(Evaluation, Vec<Variable>)> {
         match self.execute(Command::Print(expr.to_owned())).await? {
             Reply::Value(v, children) => Ok((v, children)),
+            other => unexpected(other),
+        }
+    }
+
+    /// `eval <expr>`: evaluate in the adapter's REPL context.
+    pub async fn eval(&mut self, expr: &str) -> Result<Evaluation> {
+        match self.execute(Command::Eval(expr.to_owned())).await? {
+            Reply::Value(v, _) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// `set <target> = <value>`: assign and return the new value.
+    pub async fn set(&mut self, target: &str, value: &str) -> Result<Evaluation> {
+        let cmd = Command::Set {
+            target: target.to_owned(),
+            value: value.to_owned(),
+        };
+        match self.execute(cmd).await? {
+            Reply::Value(v, _) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// Complete an expression with the cursor at its end.
+    pub async fn complete(&mut self, text: &str) -> Result<Vec<Completion>> {
+        let cmd = Command::Complete {
+            text: text.to_owned(),
+            column: text.chars().count(),
+        };
+        match self.execute(cmd).await? {
+            Reply::Completions(c) => Ok(c),
             other => unexpected(other),
         }
     }

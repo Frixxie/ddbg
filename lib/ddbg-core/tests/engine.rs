@@ -25,6 +25,8 @@ struct Fake {
     seq: i64,
     log: Log,
     bp_id: i64,
+    caps: Value,
+    args: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 impl Fake {
@@ -69,11 +71,36 @@ impl Fake {
             };
             self.log.lock().unwrap().push(req.command.clone());
             let args = req.arguments.clone().unwrap_or(Value::Null);
+            self.args
+                .lock()
+                .unwrap()
+                .push((req.command.clone(), args.clone()));
             match req.command.as_str() {
                 "initialize" => {
+                    let mut caps = json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true, "supportsExceptionInfoRequest": true});
+                    if let Value::Object(extra) = &self.caps {
+                        caps.as_object_mut().unwrap().extend(extra.clone());
+                    }
+                    self.respond(&req, caps).await
+                }
+                "setExpression" => {
+                    self.respond(&req, json!({"value": args["value"], "type": "i32"}))
+                        .await
+                }
+                "setVariable" => {
                     self.respond(
                         &req,
-                        json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true, "supportsExceptionInfoRequest": true}),
+                        json!({"value": args["value"], "type": "i32", "variablesReference": 0}),
+                    )
+                    .await
+                }
+                "completions" => {
+                    self.respond(
+                        &req,
+                        json!({"targets": [
+                            {"label": "point", "type": "variable"},
+                            {"label": "pos", "text": "pos", "start": 3, "length": 2}
+                        ]}),
                     )
                     .await
                 }
@@ -195,9 +222,18 @@ impl Fake {
     }
 }
 
+type Args = Arc<Mutex<Vec<(String, Value)>>>;
+
 fn engine() -> (EngineHandle, Log) {
+    let (e, log, _) = engine_with(json!({}));
+    (e, log)
+}
+
+fn engine_with(caps: Value) -> (EngineHandle, Log, Args) {
     let log: Log = Arc::default();
     let log2 = log.clone();
+    let args: Args = Arc::default();
+    let args2 = args.clone();
     let config = EngineConfig {
         adapter: Arc::new(LldbDapAdapter::default()),
         cwd: PathBuf::from("/"),
@@ -216,6 +252,8 @@ fn engine() -> (EngineHandle, Log) {
                     seq: 0,
                     log: log2.clone(),
                     bp_id: 0,
+                    caps: caps.clone(),
+                    args: args2.clone(),
                 }
                 .run(),
             );
@@ -226,7 +264,7 @@ fn engine() -> (EngineHandle, Log) {
             })
         }),
     );
-    (handle, log)
+    (handle, log, args)
 }
 
 async fn wait_for(
@@ -250,7 +288,14 @@ fn requests(log: &Log, name: &str) -> usize {
 }
 
 async fn start_stopped_at_breakpoint() -> (EngineHandle, Log, broadcast::Receiver<DebugEvent>) {
-    let (e, log) = engine();
+    let (e, log, rx, _) = start_stopped_with(json!({})).await;
+    (e, log, rx)
+}
+
+async fn start_stopped_with(
+    caps: Value,
+) -> (EngineHandle, Log, broadcast::Receiver<DebugEvent>, Args) {
+    let (e, log, args) = engine_with(caps);
     let mut rx = e.subscribe();
     e.execute(Command::Break(Location::Source(SourceLocation::new(
         "/src/main.rs",
@@ -268,7 +313,137 @@ async fn start_stopped_at_breakpoint() -> (EngineHandle, Log, broadcast::Receive
     };
     assert_eq!(info.reason, StopReason::Breakpoint(vec![BreakpointId(1)]));
     assert_eq!(info.frame.unwrap().line, 5);
-    (e, log, rx)
+    (e, log, rx, args)
+}
+
+fn last_args(args: &Args, command: &str) -> Value {
+    args.lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(c, _)| c == command)
+        .map(|(_, a)| a.clone())
+        .unwrap_or_else(|| panic!("no {command} request"))
+}
+
+fn set(target: &str, value: &str) -> Command {
+    Command::Set {
+        target: target.into(),
+        value: value.into(),
+    }
+}
+
+#[tokio::test]
+async fn set_prefers_set_expression() {
+    let (e, log, mut rx, args) =
+        start_stopped_with(json!({"supportsSetExpression": true, "supportsSetVariable": true}))
+            .await;
+    let Reply::Value(v, _) = e.execute(set("p.x", "7")).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(v.value, "7");
+    assert_eq!(
+        last_args(&args, "setExpression"),
+        json!({"expression": "p.x", "value": "7", "frameId": 10})
+    );
+    assert_eq!(requests(&log, "setVariable"), 0);
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::VariablesChanged)).await;
+}
+
+#[tokio::test]
+async fn set_falls_back_to_set_variable() {
+    let (e, log, _rx, args) = start_stopped_with(json!({"supportsSetVariable": true})).await;
+    e.execute(Command::Locals).await.unwrap();
+    e.execute(set("x", "5")).await.unwrap();
+    assert_eq!(
+        last_args(&args, "setVariable"),
+        json!({"variablesReference": 100, "name": "x", "value": "5"})
+    );
+    // The cache is invalidated: locals are fetched again.
+    let before = requests(&log, "variables");
+    e.execute(Command::Locals).await.unwrap();
+    assert_eq!(requests(&log, "variables"), before + 1);
+
+    // Members resolve through the parent's children (`p` → ref 300 → `x`).
+    e.execute(set("p.x", "6")).await.unwrap();
+    assert_eq!(
+        last_args(&args, "setVariable"),
+        json!({"variablesReference": 300, "name": "x", "value": "6"})
+    );
+    let err = e.execute(set("p.nope", "1")).await.unwrap_err();
+    assert!(err.to_string().contains("no member"), "{err}");
+    let err = e.execute(set("nope", "1")).await.unwrap_err();
+    assert!(err.to_string().contains("no variable"), "{err}");
+}
+
+#[tokio::test]
+async fn set_without_support_fails_and_set_variable_targets_scope() {
+    let (e, _log, _rx, _) = start_stopped_with(json!({})).await;
+    let err = e.execute(set("x", "1")).await.unwrap_err();
+    assert!(err.to_string().contains("does not support"), "{err}");
+
+    let (e, _log, _rx, args) = start_stopped_with(json!({"supportsSetVariable": true})).await;
+    let cmd = Command::SetVariable {
+        scope: ddbg_core::variable::VarRef(100),
+        name: "x".into(),
+        value: "9".into(),
+    };
+    let Reply::Value(v, _) = e.execute(cmd).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(v.value, "9");
+    assert_eq!(last_args(&args, "setVariable")["variablesReference"], 100);
+}
+
+#[tokio::test]
+async fn eval_uses_repl_context() {
+    let (e, _log, _rx, args) = start_stopped_with(json!({})).await;
+    e.execute(Command::Eval("x = 1".into())).await.unwrap();
+    assert_eq!(last_args(&args, "evaluate")["context"], "repl");
+    e.execute(Command::Print("x".into())).await.unwrap();
+    assert_eq!(last_args(&args, "evaluate")["context"], "watch");
+}
+
+#[tokio::test]
+async fn completions_map_ranges_and_fall_back_to_locals() {
+    let (e, _log, _rx, args) =
+        start_stopped_with(json!({"supportsCompletionsRequest": true})).await;
+    let cmd = Command::Complete {
+        text: "p.po".into(),
+        column: 4,
+    };
+    let Reply::Completions(items) = e.execute(cmd).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        last_args(&args, "completions"),
+        json!({"text": "p.po", "column": 5, "frameId": 10})
+    );
+    // No range: replace the identifier at the cursor.
+    assert_eq!(
+        (items[0].text.as_str(), items[0].start, items[0].length),
+        ("point", 2, 2)
+    );
+    // 1-based `start` from the adapter.
+    assert_eq!((items[1].start, items[1].length), (2, 2));
+
+    let (e, log, _rx, _) = start_stopped_with(json!({})).await;
+    let Reply::Completions(items) = e
+        .execute(Command::Complete {
+            text: "1 + ".into(),
+            column: 4,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].text.as_str(), items[0].start, items[0].length),
+        ("x", 4, 0)
+    );
+    assert_eq!(requests(&log, "completions"), 0);
 }
 
 #[tokio::test]

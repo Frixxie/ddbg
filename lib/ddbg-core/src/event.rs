@@ -18,6 +18,8 @@ pub enum DebugEvent {
     BreakpointChanged(Breakpoint),
     ThreadsChanged,
     FrameChanged,
+    /// A value was assigned; cached variables are stale.
+    VariablesChanged,
 
     Output(Output),
 }

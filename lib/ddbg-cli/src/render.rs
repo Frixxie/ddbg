@@ -316,6 +316,13 @@ impl Renderer {
                 }
                 Some(s.trim_end().to_owned())
             }
+            Reply::Completions(items) => Some(
+                items
+                    .iter()
+                    .map(|c| c.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             Reply::Quit => None,
         }
     }

@@ -24,6 +24,7 @@ const KEYS: &[(&str, &str)] = &[
     ("u / d", "frame up / down"),
     ("Enter", "select frame (stack pane)"),
     ("Enter", "view variable value (locals pane)"),
+    ("=", "edit variable value (locals pane)"),
     (".", "jump to execution point"),
     ("j/k, arrows", "move / scroll"),
     ("g / G", "top / bottom"),
@@ -31,6 +32,7 @@ const KEYS: &[(&str, &str)] = &[
     ("t", "pick a test to debug or run"),
     ("F", "find functions to break on"),
     (":", "command line (REPL syntax)"),
+    ("Tab", "complete (command line)"),
     ("q", "quit"),
 ];
 
@@ -557,6 +559,20 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(edit) = &app.edit {
+        let prompt = format!("set {} = ", edit.name);
+        let line = Line::from(vec![
+            Span::styled(prompt.as_str(), Style::new().bold()),
+            Span::raw(edit.value.as_str()),
+        ]);
+        f.render_widget(line, area);
+        let x = (prompt.chars().count() + edit.value.chars().count()) as u16;
+        f.set_cursor_position((area.x + x.min(area.width.saturating_sub(1)), area.y));
+        return;
+    }
+    if let Some(list) = &app.completions {
+        draw_completions(f, list, area);
+    }
     match &app.input {
         Some(input) => {
             let line = Line::from(vec![
@@ -571,6 +587,50 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(Line::styled(hint, Style::new().fg(Color::DarkGray)), area);
         }
     }
+}
+
+/// Completion popup just above the command line.
+fn draw_completions(f: &mut Frame, list: &crate::app::CompletionList, bottom: Rect) {
+    const MAX_ROWS: usize = 10;
+    let rows = list.items.len().min(MAX_ROWS);
+    let width = list
+        .items
+        .iter()
+        .map(|s| {
+            s.value.chars().count() + s.description.as_ref().map_or(0, |d| d.chars().count() + 2)
+        })
+        .max()
+        .unwrap_or(0)
+        .min(bottom.width.saturating_sub(2) as usize) as u16
+        + 2;
+    let height = rows as u16 + 2;
+    if bottom.y < height {
+        return;
+    }
+    let rect = Rect::new(bottom.x, bottom.y - height, width.max(12), height);
+    let items: Vec<ListItem> = list
+        .items
+        .iter()
+        .map(|s| {
+            let mut spans = vec![Span::raw(s.value.as_str())];
+            if let Some(d) = &s.description {
+                spans.push(Span::styled(
+                    format!("  {d}"),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(list.index));
+    f.render_widget(Clear, rect);
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block("complete", true))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        rect,
+        &mut state,
+    );
 }
 
 fn draw_help(f: &mut Frame) {

@@ -5,7 +5,7 @@ use ddbg_dap::protocol as dap;
 pub struct VarRef(pub i64);
 
 impl VarRef {
-    fn from_raw(r: i64) -> Option<Self> {
+    pub(crate) fn from_raw(r: i64) -> Option<Self> {
         (r > 0).then_some(Self(r))
     }
 }
