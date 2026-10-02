@@ -2,6 +2,11 @@
 name = "ddbg-cli"
 version.workspace = true
 edition.workspace = true
+description = "Command-line interface for the ddbg debugger"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 ddbg-dap.workspace = true

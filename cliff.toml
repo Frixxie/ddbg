@@ -1,0 +1,57 @@
+# git-cliff configuration: https://git-cliff.org/docs/configuration
+# CHANGELOG.md is also read by dist to fill in GitHub Release notes, which
+# expects headings of the form "## [x.y.z] - date".
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.\n
+"""
+body = """
+{% if version -%}
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## [Unreleased]
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | split(pat="\n") | first | upper_first | trim }}\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
+commit_preprocessors = [
+  # Treat "tui: foo" / "core: foo" as a scoped change.
+  { pattern = '^(cli|core|dap|tui|project|test|driver): ', replace = "chore($1): " },
+]
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Changed" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^(test|ci|build|style)", group = "<!-- 6 -->Maintenance" },
+  { message = "^chore", group = "<!-- 5 -->Other" },
+  { message = "^(?i)add", group = "<!-- 0 -->Added" },
+  { message = "^(?i)fix", group = "<!-- 1 -->Fixed" },
+  { message = ".*", group = "<!-- 5 -->Other" },
+]
+
+[bump]
+# Pre-1.0: breaking changes bump minor, features bump minor, fixes bump patch.
+features_always_bump_minor = true
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"

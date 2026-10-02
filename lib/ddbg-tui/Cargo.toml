@@ -2,6 +2,11 @@
 name = "ddbg-tui"
 version.workspace = true
 edition.workspace = true
+description = "Terminal user interface for ddbg"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 ddbg-core.workspace = true

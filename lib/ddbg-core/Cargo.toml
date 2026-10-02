@@ -2,6 +2,11 @@
 name = "ddbg-core"
 version.workspace = true
 edition.workspace = true
+description = "Core debugger session logic for ddbg"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 ddbg-dap.workspace = true

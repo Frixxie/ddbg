@@ -7,15 +7,17 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/Frixxie/ddbg"
+homepage = "https://github.com/Frixxie/ddbg"
 
 [workspace.dependencies]
-ddbg-dap = { path = "lib/ddbg-dap" }
-ddbg-core = { path = "lib/ddbg-core" }
-ddbg-cli = { path = "lib/ddbg-cli" }
-ddbg-project = { path = "lib/ddbg-project" }
-ddbg-test = { path = "lib/ddbg-test" }
-ddbg-tui = { path = "lib/ddbg-tui" }
-ddbg-driver = { path = "lib/ddbg-driver" }
+ddbg-dap = { path = "lib/ddbg-dap", version = "0.1.0" }
+ddbg-core = { path = "lib/ddbg-core", version = "0.1.0" }
+ddbg-cli = { path = "lib/ddbg-cli", version = "0.1.0" }
+ddbg-project = { path = "lib/ddbg-project", version = "0.1.0" }
+ddbg-test = { path = "lib/ddbg-test", version = "0.1.0" }
+ddbg-tui = { path = "lib/ddbg-tui", version = "0.1.0" }
+ddbg-driver = { path = "lib/ddbg-driver", version = "0.1.0" }
 
 anyhow = "1.0.104"
 bytes = "1.12.1"
@@ -32,3 +34,29 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 
 [profile.release]
 lto = "fat"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false

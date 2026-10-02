@@ -2,6 +2,11 @@
 name = "ddbg-project"
 version.workspace = true
 edition.workspace = true
+description = "Project detection for ddbg"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 serde_json.workspace = true

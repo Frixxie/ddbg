@@ -26,7 +26,65 @@ The adapter is picked from the detected project (`Cargo.toml`, `*.csproj`,
 Use `ddbg -- -m package.module` to debug a Python module. `--adapter` overrides
 the choice, e.g. `--adapter ".venv/bin/python -m debugpy.adapter"`.
 
-## Build
+## Install
+
+Prebuilt binaries are published on
+[GitHub Releases](https://github.com/Frixxie/ddbg/releases) for Linux
+(x86_64, aarch64), macOS (x86_64, Apple Silicon) and Windows (x86_64).
+
+Preferred, prebuilt binary via [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+
+```console
+cargo binstall ddbg
+```
+
+Compile locally from crates.io:
+
+```console
+cargo install ddbg --locked
+```
+
+Installer script, macOS/Linux:
+
+```console
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Frixxie/ddbg/releases/latest/download/ddbg-installer.sh | sh
+```
+
+Installer script, Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/Frixxie/ddbg/releases/latest/download/ddbg-installer.ps1 | iex"
+```
+
+Manual: download the archive for your platform from
+[GitHub Releases](https://github.com/Frixxie/ddbg/releases), check it against
+the `.sha256` file, extract it and put `ddbg` on your `PATH`.
+
+## Releasing
+
+Releases are built by [dist](https://github.com/axodotdev/cargo-dist), which
+generates `.github/workflows/release.yml`. Don't edit that file by hand; change
+`[workspace.metadata.dist]` in `Cargo.toml` and run `dist generate`.
+
+Versions and [CHANGELOG.md](CHANGELOG.md) are managed with
+[git-cliff](https://git-cliff.org) (config in `cliff.toml`). Use
+[Conventional Commits](https://www.conventionalcommits.org) (`feat:`, `fix:`,
+`feat!:` …) so git-cliff can pick the next version: before 1.0, `feat` and
+breaking changes bump the minor version, everything else bumps the patch.
+
+```console
+scripts/release.sh          # or: scripts/release.sh 0.2.0 to force a version
+```
+
+This bumps the workspace version, regenerates `CHANGELOG.md`, runs the tests
+and commits `chore(release): vX.Y.Z`. It then prints the remaining steps:
+publish to crates.io, push, and push the `vX.Y.Z` tag.
+
+Pushing the tag builds all targets and creates the GitHub Release with
+archives, checksums and installers. dist uses the matching `CHANGELOG.md`
+section as the release notes.
+
+## Build from source
 
 ```console
 cargo build --release

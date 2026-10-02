@@ -2,6 +2,11 @@
 name = "ddbg-dap"
 version.workspace = true
 edition.workspace = true
+description = "Debug Adapter Protocol client for ddbg"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 bytes.workspace = true

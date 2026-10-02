@@ -2,9 +2,21 @@
 name = "ddbg"
 version.workspace = true
 edition.workspace = true
+description = "A terminal-first, language-agnostic debugger built on the Debug Adapter Protocol"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 ddbg-cli.workspace = true
 ddbg-tui.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "txz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"

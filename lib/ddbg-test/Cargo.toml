@@ -2,6 +2,11 @@
 name = "ddbg-test"
 version.workspace = true
 edition.workspace = true
+description = "Test discovery and debugging for ddbg"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 ddbg-core.workspace = true
