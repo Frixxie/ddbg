@@ -60,3 +60,5 @@ targets = [
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Run CI before planning a release
+plan-jobs = ["./ci"]
