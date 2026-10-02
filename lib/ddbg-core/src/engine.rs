@@ -413,7 +413,7 @@ impl Engine {
     /// DAP lifecycle: initialize → launch → `initialized` → setBreakpoints
     /// → configurationDone → launch response.
     async fn launch(&mut self, target: &LaunchTarget) -> Result<()> {
-        let launch_args = self.adapter.build_launch_request(target)?;
+        let launch_args = self.adapter.build_launch_request(&with_color_env(target))?;
         let conn = (self.connector)(self.adapter.as_ref())?;
         let client = conn.client.clone();
         let mut incoming = conn.incoming;
@@ -1120,6 +1120,28 @@ fn char_offset(text: &str, units: usize) -> usize {
         n += c.len_utf16();
     }
     text.chars().count()
+}
+
+/// The debuggee's output is piped through the adapter, so programs would
+/// normally disable colors. Ask common runtimes to emit ANSI colors anyway,
+/// unless `NO_COLOR` is set or the variable is already provided.
+fn with_color_env(target: &LaunchTarget) -> LaunchTarget {
+    let mut t = target.clone();
+    if std::env::var_os("NO_COLOR").is_some() || t.env.contains_key("NO_COLOR") {
+        return t;
+    }
+    for (key, value) in [
+        ("DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION", "1"),
+        ("Logging__Console__FormatterOptions__ColorBehavior", "Enabled"),
+        ("FORCE_COLOR", "1"),
+        ("CLICOLOR_FORCE", "1"),
+        ("CARGO_TERM_COLOR", "always"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            t.env.entry(key.to_owned()).or_insert_with(|| value.to_owned());
+        }
+    }
+    t
 }
 
 #[cfg(test)]
