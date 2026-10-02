@@ -64,6 +64,7 @@ impl DotNetTestProvider {
                 .arg(&project)
                 .args([
                     "-nologo",
+                    "-t:Build",
                     "-getProperty:TargetPath",
                     "-getProperty:IsTestingPlatformApplication",
                 ])
@@ -108,7 +109,13 @@ impl DotNetTestProvider {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        Ok(parse_list(&stdout))
+        let (mut framework, names) = parse_list(&stdout);
+        // The banner is not printed in every environment (e.g. CI), so also
+        // detect xUnit v3 from the assemblies next to the test application.
+        if output_dir(&asm.assembly).join("xunit.v3.core.dll").exists() {
+            framework = Framework::XUnitV3;
+        }
+        Ok((framework, names))
     }
 }
 
