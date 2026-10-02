@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ddbg_dap::client::channel_closed;
 use ddbg_dap::protocol::{
@@ -110,6 +110,7 @@ pub fn spawn_with_connector(config: EngineConfig, connector: Connector) -> Engin
         incoming: None,
         cwd: config.cwd,
         events: events.clone(),
+        resumed_at: None,
     };
     tokio::spawn(engine.run(cmd_rx));
     EngineHandle { cmd_tx, events }
@@ -128,6 +129,8 @@ struct Engine {
     incoming: Option<mpsc::UnboundedReceiver<Incoming>>,
     cwd: PathBuf,
     events: broadcast::Sender<DebugEvent>,
+    /// When the debuggee last resumed, for timing the next stop.
+    resumed_at: Option<Instant>,
 }
 
 async fn recv_incoming(rx: &mut Option<mpsc::UnboundedReceiver<Incoming>>) -> Option<Incoming> {
@@ -178,6 +181,7 @@ impl Engine {
             Command::Run(target) => self.cmd_run(target).await,
             Command::Continue => {
                 let tid = self.require_stopped()?;
+                self.resumed_at = Some(Instant::now());
                 let client = self.client()?;
                 client
                     .request(ContinueArguments { thread_id: tid.0 })
@@ -213,6 +217,7 @@ impl Engine {
             }
             Command::Next => {
                 let tid = self.require_stopped()?;
+                self.resumed_at = Some(Instant::now());
                 self.client()?
                     .request(NextArguments { thread_id: tid.0 })
                     .await?;
@@ -221,6 +226,7 @@ impl Engine {
             }
             Command::Step => {
                 let tid = self.require_stopped()?;
+                self.resumed_at = Some(Instant::now());
                 self.client()?
                     .request(StepInArguments { thread_id: tid.0 })
                     .await?;
@@ -229,6 +235,7 @@ impl Engine {
             }
             Command::Finish => {
                 let tid = self.require_stopped()?;
+                self.resumed_at = Some(Instant::now());
                 self.client()?
                     .request(StepOutArguments { thread_id: tid.0 })
                     .await?;
@@ -445,6 +452,7 @@ impl Engine {
         if self.session.breakpoints.has_functions() {
             self.sync_function_breakpoints().await?;
         }
+        self.resumed_at = Some(Instant::now());
         if self.session.supports(Feature::ConfigurationDone) {
             client.request(ConfigurationDoneArguments {}).await?;
         }
@@ -835,6 +843,7 @@ impl Engine {
             DapEvent::Stopped(s) => self.on_stopped(s).await?,
             DapEvent::Continued(_) => {
                 if self.session.status.is_stopped() {
+                    self.resumed_at = Some(Instant::now());
                     self.mark_resumed(true);
                 }
             }
@@ -891,6 +900,7 @@ impl Engine {
         {
             return Ok(());
         }
+        let elapsed = self.resumed_at.take().map(|t| t.elapsed());
         let hit: Vec<BreakpointId> = hit_bps.iter().map(|b| b.id).collect();
         let reason = StopReason::from_dap(&s.reason, s.text.clone(), hit);
         self.session.on_resume();
@@ -929,6 +939,7 @@ impl Engine {
             description: s.description.or(s.text),
             frame: self.session.stack.first().cloned(),
             exception,
+            elapsed,
         }));
         Ok(())
     }

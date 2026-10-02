@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ddbg_core::DebugEvent;
 use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation};
@@ -165,9 +166,10 @@ impl Renderer {
             Some(frame) => {
                 if let Some(h) = header {
                     lines.push(format!(
-                        "{h}, {} at {}",
+                        "{h}, {} at {}{}",
                         frame.name,
-                        self.frame_location(frame)
+                        self.frame_location(frame),
+                        elapsed_suffix(info.elapsed)
                     ));
                     if let StopReason::Exception(_) = &info.reason {
                         match &info.exception {
@@ -193,7 +195,11 @@ impl Renderer {
                     None => {}
                 }
             }
-            None => lines.push(header.unwrap_or_else(|| "Stopped".into())),
+            None => lines.push(format!(
+                "{}{}",
+                header.unwrap_or_else(|| "Stopped".into()),
+                elapsed_suffix(info.elapsed)
+            )),
         }
         out.push_str(&lines.join("\n"));
         out.trim_end().to_owned()
@@ -401,6 +407,19 @@ pub fn help(topic: Option<&str>) -> String {
     s.trim_end().to_owned()
 }
 
+/// ` (+12.3ms)`: time the debuggee ran before this stop.
+fn elapsed_suffix(elapsed: Option<Duration>) -> String {
+    let Some(d) = elapsed else {
+        return String::new();
+    };
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms < 1000.0 {
+        format!(" (+{ms:.1}ms)")
+    } else {
+        format!(" (+{:.2}s)", d.as_secs_f64())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,11 +451,12 @@ mod tests {
                 description: None,
                 frame: Some(frame(&file, 2, "app::main")),
                 exception: None,
+                elapsed: Some(Duration::from_micros(12_345)),
             }))
             .unwrap();
         assert_eq!(
             out,
-            "Breakpoint 1, app::main at main.rs:2\n\n1   fn main() {\n2 >     let x = 1;\n3   }"
+            "Breakpoint 1, app::main at main.rs:2 (+12.3ms)\n\n1   fn main() {\n2 >     let x = 1;\n3   }"
         );
 
         // stepping within the same function only shows the line
@@ -447,6 +467,7 @@ mod tests {
                 description: None,
                 frame: Some(frame(&file, 3, "app::main")),
                 exception: None,
+                elapsed: None,
             }))
             .unwrap();
         assert_eq!(out, "1   fn main() {\n2       let x = 1;\n3 > }");
@@ -477,6 +498,7 @@ mod tests {
                         vec![ex("System.FormatException", "Bad format", vec![])],
                     )],
                 )),
+                elapsed: None,
             }))
             .unwrap();
         assert_eq!(
@@ -485,6 +507,19 @@ mod tests {
              System.InvalidOperationException: Outer failed\n\
              \x20---> System.ArgumentException: Bad arg\n\
              \x20 ---> System.FormatException: Bad format"
+        );
+    }
+
+    #[test]
+    fn elapsed_formatting() {
+        assert_eq!(elapsed_suffix(None), "");
+        assert_eq!(
+            elapsed_suffix(Some(Duration::from_micros(450))),
+            " (+0.5ms)"
+        );
+        assert_eq!(
+            elapsed_suffix(Some(Duration::from_millis(2_500))),
+            " (+2.50s)"
         );
     }
 

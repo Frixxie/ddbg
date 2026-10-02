@@ -33,6 +33,8 @@ pub struct StopInfo {
     pub frame: Option<StackFrame>,
     /// Details from an `exceptionInfo` request, for exception stops.
     pub exception: Option<ExceptionInfo>,
+    /// Wall-clock time the debuggee ran since it last resumed.
+    pub elapsed: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
