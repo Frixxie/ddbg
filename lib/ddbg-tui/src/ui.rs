@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 use ddbg_cli::render::exception_lines;
 
 use crate::app::{App, Focus, Status};
-use crate::picker::{FunctionPicker, Picker, PickerItem, ProgramPicker, TestPicker};
+use crate::picker::{FilePicker, FunctionPicker, Picker, PickerItem, ProgramPicker, TestPicker};
 
 const KEYS: &[(&str, &str)] = &[
     ("r", "run / restart"),
@@ -31,6 +31,7 @@ const KEYS: &[(&str, &str)] = &[
     ("Tab", "cycle: source, stack, locals, log"),
     ("t", "pick a test to debug or run"),
     ("F", "find functions to break on"),
+    ("o", "open a source file"),
     (":", "command line (REPL syntax)"),
     ("Tab", "complete (command line)"),
     ("q", "quit"),
@@ -71,6 +72,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if let Some(picker) = &app.functions {
         draw_functions(f, app, picker);
+    }
+    if let Some(picker) = &app.files {
+        draw_files(f, picker);
     }
     if app.show_help {
         draw_help(f);
@@ -180,6 +184,20 @@ fn draw_functions(f: &mut Frame, app: &App, picker: &FunctionPicker) {
         detail,
         "no matching functions",
         "Enter toggle breakpoint  ^O show source  ↑/↓ move  Esc close",
+    );
+}
+
+fn draw_files(f: &mut Frame, picker: &FilePicker) {
+    let total = picker.items.as_ref().map_or(0, Vec::len);
+    let title = format!("files {}/{}", picker.matches().len(), total);
+    draw_filter_list(
+        f,
+        picker,
+        &title,
+        |p| Line::raw(p.label.clone()),
+        None,
+        "no matching files",
+        "Enter open  ↑/↓ move  Esc close",
     );
 }
 
@@ -583,7 +601,7 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             f.set_cursor_position((area.x + 1 + input.chars().count() as u16, area.y));
         }
         None => {
-            let hint = "r run  e program  c cont  n next  s step  f finish  b break  F funcs  t tests  : cmd  ? help  q quit";
+            let hint = "r run  e program  c cont  n next  s step  f finish  b break  F funcs  o open  t tests  : cmd  ? help  q quit";
             f.render_widget(Line::styled(hint, Style::new().fg(Color::DarkGray)), area);
         }
     }

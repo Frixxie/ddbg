@@ -68,6 +68,15 @@ pub fn discover(root: &Path) -> Vec<Function> {
     out
 }
 
+/// Source files under `root`, sorted by path.
+pub fn source_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    let mut paths: Vec<PathBuf> = files.into_iter().map(|(p, _)| p).collect();
+    paths.sort();
+    paths
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<(PathBuf, Lang)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

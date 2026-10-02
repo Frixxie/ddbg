@@ -18,7 +18,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 
 use crate::functions::Function;
 use crate::highlight::{self, StyledLine};
-use crate::picker::{FunctionPicker, Program, ProgramPicker, TestPicker};
+use crate::picker::{FilePicker, FunctionPicker, Program, ProgramPicker, TestPicker};
 use crate::{Executor, Msg};
 
 const MAX_LOG_LINES: usize = 5000;
@@ -308,6 +308,8 @@ pub struct App {
     pub programs: Option<ProgramPicker>,
     /// Open function picker.
     pub functions: Option<FunctionPicker>,
+    /// Open source file picker.
+    pub files: Option<FilePicker>,
     /// Binaries found by project detection.
     pub candidates: Vec<PathBuf>,
     /// Program the next `run` launches, if known.
@@ -357,6 +359,7 @@ impl App {
             picker: None,
             programs: None,
             functions: None,
+            files: None,
             candidates,
             program,
         }
@@ -644,6 +647,10 @@ impl App {
             self.function_key(key);
             return;
         }
+        if self.files.is_some() {
+            self.file_key(key);
+            return;
+        }
         if let Some(scroll) = &mut self.value_scroll {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.value_scroll = None,
@@ -664,6 +671,7 @@ impl App {
             KeyCode::Char('t') => self.open_picker(),
             KeyCode::Char('e') => self.open_program_picker(),
             KeyCode::Char('F') => self.open_function_picker(),
+            KeyCode::Char('o') => self.open_file_picker(),
             KeyCode::Char(':') => {
                 self.input = Some(String::new());
                 self.history_pos = None;
@@ -820,6 +828,43 @@ impl App {
                 self.functions = None;
                 self.open_source(&f.path);
                 self.cursor = f.line.max(1);
+                self.focus = Focus::Source;
+            }
+            KeyCode::Char(c) if !ctrl => picker.push(c),
+            _ => {}
+        }
+    }
+
+    fn open_file_picker(&mut self) {
+        let files = ddbg_cli::functions::source_files(&self.cwd)
+            .into_iter()
+            .map(|p| Program::new(p, &self.cwd))
+            .collect();
+        self.files = Some(FilePicker::with_items(files));
+    }
+
+    /// Keys while the source file picker is open.
+    fn file_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.files.as_mut() else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.files = None,
+            KeyCode::Up => picker.move_cursor(-1),
+            KeyCode::Down => picker.move_cursor(1),
+            KeyCode::PageUp => picker.move_cursor(-10),
+            KeyCode::PageDown => picker.move_cursor(10),
+            KeyCode::Char('p') if ctrl => picker.move_cursor(-1),
+            KeyCode::Char('n') if ctrl => picker.move_cursor(1),
+            KeyCode::Backspace => picker.pop(),
+            KeyCode::Enter => {
+                let Some(path) = picker.selected().map(|f| f.path.clone()) else {
+                    return;
+                };
+                self.files = None;
+                self.open_source(&path);
+                self.cursor = 1;
                 self.focus = Focus::Source;
             }
             KeyCode::Char(c) if !ctrl => picker.push(c),

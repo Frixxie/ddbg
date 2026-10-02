@@ -43,6 +43,8 @@ impl PickerItem for Program {
 
 pub type TestPicker = Picker<TestCase>;
 pub type ProgramPicker = Picker<Program>;
+/// Source files, listed relative to the working directory like programs.
+pub type FilePicker = Picker<Program>;
 pub type FunctionPicker = Picker<crate::functions::Function>;
 
 pub struct Picker<T> {
