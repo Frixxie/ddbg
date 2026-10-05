@@ -149,7 +149,8 @@ impl TestProvider for DotNetTestProvider {
         for id in tests {
             let (assembly, framework) = dotnet_data(id)?;
             let out = dotnet_exec(assembly, filter_args(framework, &id.name)?)
-                .args(["--no-ansi", "--no-progress"])
+                .arg("--no-ansi")
+                .args(progress_off(assembly))
                 .output()
                 .await
                 .context("failed to run dotnet")?;
@@ -167,7 +168,8 @@ impl TestProvider for DotNetTestProvider {
     async fn debug_target(&self, test: &TestId) -> anyhow::Result<DebugTarget> {
         let (assembly, framework) = dotnet_data(test)?;
         let mut args = filter_args(framework, &test.name)?;
-        args.extend(["--no-ansi", "--no-progress"].map(String::from));
+        args.push("--no-ansi".into());
+        args.extend(progress_off(assembly).iter().map(|s| s.to_string()));
         if *framework == Framework::XUnitV3 {
             args.extend(["--parallel", "none"].map(String::from));
         }
@@ -179,6 +181,24 @@ impl TestProvider for DotNetTestProvider {
             stop_on_entry: false,
         }))
     }
+}
+
+/// Arguments that disable progress output. MTP v2 deprecated
+/// `--no-progress` in favour of `--progress off`, which v1 lacks.
+fn progress_off(assembly: &Path) -> &'static [&'static str] {
+    let deps = std::fs::read_to_string(assembly.with_extension("deps.json")).unwrap_or_default();
+    match mtp_major_version(&deps) {
+        Some(v) if v >= 2 => &["--progress", "off"],
+        _ => &["--no-progress"],
+    }
+}
+
+/// Major version of Microsoft.Testing.Platform from a `.deps.json` file.
+fn mtp_major_version(deps_json: &str) -> Option<u32> {
+    const KEY: &str = "\"Microsoft.Testing.Platform/";
+    let start = deps_json.find(KEY)? + KEY.len();
+    let rest = &deps_json[start..];
+    rest[..rest.find('.')?].parse().ok()
 }
 
 fn dotnet_data(id: &TestId) -> anyhow::Result<(&Path, &Framework)> {
@@ -469,6 +489,17 @@ mod tests {
 Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
   duration: 66ms
 ";
+
+    #[test]
+    fn reads_mtp_major_version() {
+        let deps = r#"{"libraries": {"Microsoft.Testing.Platform/2.4.0": {}, "Microsoft.Testing.Platform.MSBuild/2.4.0": {}}}"#;
+        assert_eq!(mtp_major_version(deps), Some(2));
+        assert_eq!(
+            mtp_major_version(r#""Microsoft.Testing.Platform/1.9.1""#),
+            Some(1)
+        );
+        assert_eq!(mtp_major_version("{}"), None);
+    }
 
     #[test]
     fn parses_xunit_list() {

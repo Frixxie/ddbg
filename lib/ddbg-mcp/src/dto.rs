@@ -149,7 +149,11 @@ impl From<Breakpoint> for BreakpointDto {
             requested: b.requested.to_string(),
             resolved: b.resolved.map(|r| r.to_string()),
             verified: b.verified,
-            message: b.message,
+            message: b.message.or_else(|| {
+                (!b.verified).then(|| {
+                    "pending: binds when the code is loaded, or the location has no code".into()
+                })
+            }),
         }
     }
 }
@@ -301,5 +305,6 @@ mod tests {
         let v = serde_json::to_value(BreakpointDto::from(bp)).unwrap();
         assert_eq!(v["requested"], "src/main.rs:14");
         assert_eq!(v["kind"], "source");
+        assert!(v["message"].as_str().unwrap().starts_with("pending"));
     }
 }

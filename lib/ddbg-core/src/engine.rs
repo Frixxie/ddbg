@@ -516,6 +516,9 @@ impl Engine {
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
+                if let Some(eval) = self.array_length(&expression, frame_id).await {
+                    return self.value_reply(eval).await;
+                }
                 let null = if context == "watch" {
                     self.null_prefix(&expression, frame_id).await
                 } else {
@@ -530,11 +533,14 @@ impl Engine {
                 });
             }
         };
+        let eval = Evaluation::from(resp);
         if context == "repl" {
-            // REPL evaluation may have side effects.
+            // REPL evaluation may have side effects, so it is not repeated
+            // to describe the value.
             self.invalidate_variables();
+            return self.value_reply(eval).await;
         }
-        self.value_reply(Evaluation::from(resp)).await
+        self.eval_reply(&expression, eval).await
     }
 
     /// The longest member-access prefix of a failed expression that
@@ -557,6 +563,52 @@ impl Engine {
                 .then(|| prefix.to_owned());
         }
         None
+    }
+
+    /// `arr.Length` (or `LongLength`/`Count`) computed from the array's
+    /// value, e.g. `{int[3]}`. netcoredbg cannot evaluate members of arrays.
+    async fn array_length(&self, expression: &str, frame_id: Option<i64>) -> Option<Evaluation> {
+        let (receiver, member) = expression.trim().rsplit_once('.')?;
+        let type_name = match member.trim() {
+            "Length" | "Count" => "int",
+            "LongLength" => "long",
+            _ => return None,
+        };
+        let receiver = receiver.trim();
+        if receiver.is_empty() {
+            return None;
+        }
+        let resp = self
+            .client()
+            .ok()?
+            .request(EvaluateArguments {
+                expression: receiver.to_owned(),
+                frame_id,
+                context: Some("watch".into()),
+            })
+            .await
+            .ok()?;
+        let len = array_length_of(&resp.result)?;
+        Some(Evaluation {
+            value: len.to_string(),
+            type_name: Some(type_name.into()),
+            children: None,
+        })
+    }
+
+    /// Build a value reply, replacing an opaque top-level value with its
+    /// `ToString()` like `describe` does for children.
+    async fn eval_reply(&mut self, expression: &str, mut eval: Evaluation) -> Result<Reply> {
+        let mut top = [Variable {
+            name: expression.to_owned(),
+            value: eval.value.clone(),
+            type_name: eval.type_name.clone(),
+            children: eval.children,
+            evaluate_name: Some(expression.to_owned()),
+        }];
+        self.describe(&mut top).await;
+        eval.value = std::mem::take(&mut top[0].value);
+        self.value_reply(eval).await
     }
 
     async fn value_reply(&mut self, eval: Evaluation) -> Result<Reply> {
@@ -1199,6 +1251,37 @@ fn with_color_env(target: &LaunchTarget) -> LaunchTarget {
         }
     }
     t
+}
+
+/// Element count from a .NET array value such as `{int[3]}` or
+/// `{string[2, 4]}`.
+fn array_length_of(value: &str) -> Option<u64> {
+    let inner = value.trim().strip_prefix('{')?.strip_suffix('}')?;
+    if !inner.ends_with(']') {
+        return None;
+    }
+    inner.split('[').skip(1).find_map(|group| {
+        let dims = group.strip_suffix(']')?;
+        dims.split(',')
+            .map(|d| d.trim().parse::<u64>().ok())
+            .try_fold(1u64, |acc, d| Some(acc * d?))
+    })
+}
+
+#[cfg(test)]
+mod array_length_tests {
+    use super::array_length_of;
+
+    #[test]
+    fn parses_array_values() {
+        assert_eq!(array_length_of("{int[3]}"), Some(3));
+        assert_eq!(array_length_of("{Foo.Bar[0]}"), Some(0));
+        assert_eq!(array_length_of("{int[2, 4]}"), Some(8));
+        assert_eq!(array_length_of("{int[2][]}"), Some(2));
+        assert_eq!(array_length_of("{System.Guid}"), None);
+        assert_eq!(array_length_of("{int[]}"), None);
+        assert_eq!(array_length_of("3"), None);
+    }
 }
 
 /// Prefixes of `expr` ending before each top-level `.` or `->`, shortest
