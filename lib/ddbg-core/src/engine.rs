@@ -508,16 +508,55 @@ impl Engine {
         let resp = self
             .client()?
             .request(EvaluateArguments {
-                expression,
+                expression: expression.clone(),
                 frame_id,
                 context: Some(context.into()),
             })
-            .await?;
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                let null = if context == "watch" {
+                    self.null_prefix(&expression, frame_id).await
+                } else {
+                    None
+                };
+                return Err(match null {
+                    Some(p) => anyhow!(
+                        "cannot evaluate `{expression}`: `{p}` is null ({})",
+                        e.to_string().trim()
+                    ),
+                    None => evaluate_error(&expression, e),
+                });
+            }
+        };
         if context == "repl" {
             // REPL evaluation may have side effects.
             self.invalidate_variables();
         }
         self.value_reply(Evaluation::from(resp)).await
+    }
+
+    /// The longest member-access prefix of a failed expression that
+    /// evaluates to null, e.g. `a.b` for `a.b.c` when `a.b` is null.
+    /// Adapters often report such failures as a missing name instead.
+    async fn null_prefix(&self, expression: &str, frame_id: Option<i64>) -> Option<String> {
+        let client = self.client().ok()?;
+        for prefix in member_prefixes(expression).into_iter().rev() {
+            let Ok(resp) = client
+                .request(EvaluateArguments {
+                    expression: prefix.to_owned(),
+                    frame_id,
+                    context: Some("watch".into()),
+                })
+                .await
+            else {
+                continue;
+            };
+            return matches!(resp.result.trim(), "null" | "None" | "nullptr" | "NULL")
+                .then(|| prefix.to_owned());
+        }
+        None
     }
 
     async fn value_reply(&mut self, eval: Evaluation) -> Result<Reply> {
@@ -962,6 +1001,19 @@ impl Engine {
         if let Some(tid) = tid {
             self.load_stack(tid).await?;
         }
+        if s.reason == "breakpoint" {
+            let at = self.session.stack.first().and_then(|f| {
+                f.path
+                    .as_ref()
+                    .map(|p| crate::breakpoint::SourceLocation::new(p.clone(), f.line))
+            });
+            let hit: Vec<BreakpointId> = hit_bps.iter().map(|b| b.id).collect();
+            for id in self.session.breakpoints.mark_hit(&hit, at.as_ref()) {
+                if let Some(bp) = self.session.breakpoints.get(id).cloned() {
+                    self.emit(DebugEvent::BreakpointChanged(bp));
+                }
+            }
+        }
         let exception = match (&reason, tid) {
             (StopReason::Exception(_), Some(tid)) => self.exception_info(tid).await,
             _ => None,
@@ -1132,16 +1184,92 @@ fn with_color_env(target: &LaunchTarget) -> LaunchTarget {
     }
     for (key, value) in [
         ("DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION", "1"),
-        ("Logging__Console__FormatterOptions__ColorBehavior", "Enabled"),
+        (
+            "Logging__Console__FormatterOptions__ColorBehavior",
+            "Enabled",
+        ),
         ("FORCE_COLOR", "1"),
         ("CLICOLOR_FORCE", "1"),
         ("CARGO_TERM_COLOR", "always"),
     ] {
         if std::env::var_os(key).is_none() {
-            t.env.entry(key.to_owned()).or_insert_with(|| value.to_owned());
+            t.env
+                .entry(key.to_owned())
+                .or_insert_with(|| value.to_owned());
         }
     }
     t
+}
+
+/// Prefixes of `expr` ending before each top-level `.` or `->`, shortest
+/// first: `a[0].b.c` gives `a[0]` and `a[0].b`.
+fn member_prefixes(expr: &str) -> Vec<&str> {
+    let mut prefixes = Vec::new();
+    let mut depth = 0i32;
+    let mut quote = None;
+    let bytes = expr.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        match (quote, c) {
+            (Some(q), _) if c == q && bytes.get(i.wrapping_sub(1)) != Some(&b'\\') => quote = None,
+            (Some(_), _) => {}
+            (None, b'"' | b'\'') => quote = Some(c),
+            (None, b'(' | b'[' | b'{') => depth += 1,
+            (None, b')' | b']' | b'}') => depth -= 1,
+            (None, b'.') if depth == 0 && i > 0 => prefixes.push(&expr[..i]),
+            (None, b'-') if depth == 0 && i > 0 && bytes.get(i + 1) == Some(&b'>') => {
+                prefixes.push(&expr[..i])
+            }
+            _ => {}
+        }
+    }
+    prefixes.retain(|p| !p.trim().is_empty() && !p.trim().bytes().all(|c| c.is_ascii_digit()));
+    prefixes
+}
+
+/// Name the failing expression and explain bare HRESULTs from netcoredbg.
+fn evaluate_error(expression: &str, e: anyhow::Error) -> anyhow::Error {
+    let message = e.to_string();
+    let hint = [
+        (
+            "0x80070057",
+            "invalid argument; often a member access on a null value or an expression \
+             the evaluator does not support",
+        ),
+        ("0x80004005", "unspecified failure"),
+    ]
+    .into_iter()
+    .find(|(code, _)| message.to_ascii_lowercase().contains(code))
+    .map(|(_, hint)| format!(" ({hint})"))
+    .unwrap_or_default();
+    anyhow!("cannot evaluate `{expression}`: {message}{hint}")
+}
+
+#[cfg(test)]
+mod evaluate_error_tests {
+    use super::*;
+
+    #[test]
+    fn names_expression_and_explains_hresult() {
+        let e = evaluate_error("a.b", anyhow!("evaluate failed: error 0x80070057"));
+        let s = e.to_string();
+        assert!(
+            s.starts_with("cannot evaluate `a.b`: evaluate failed"),
+            "{s}"
+        );
+        assert!(s.contains("null"), "{s}");
+    }
+
+    #[test]
+    fn splits_member_prefixes() {
+        assert_eq!(
+            member_prefixes("Issue[0].Diagnostics.Length"),
+            ["Issue[0]", "Issue[0].Diagnostics"]
+        );
+        assert_eq!(member_prefixes("f(a.b).c"), ["f(a.b)"]);
+        assert_eq!(member_prefixes("p->next->x"), ["p", "p->next"]);
+        assert_eq!(member_prefixes("s[\"a.b\"].x"), ["s[\"a.b\"]"]);
+        assert!(member_prefixes("x").is_empty());
+    }
 }
 
 #[cfg(test)]

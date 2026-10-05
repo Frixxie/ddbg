@@ -104,6 +104,27 @@ async fn start_session_reports_project() {
     client.cancel().await.unwrap();
 }
 
+#[tokio::test]
+async fn list_results_are_objects() {
+    let client = connect().await;
+    call(
+        &client,
+        "start_session",
+        json!({ "cwd": fixture("hello-python") }),
+    )
+    .await;
+    call(
+        &client,
+        "set_breakpoint",
+        json!({ "file": "main.py", "line": 18 }),
+    )
+    .await;
+    let bps = call(&client, "list_breakpoints", json!({})).await;
+    assert_eq!(bps["breakpoints"][0]["id"], 1, "{bps}");
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires lldb-dap"]
 async fn debug_rust_program() {
@@ -140,6 +161,9 @@ async fn debug_rust_program() {
 
     let bt = call(&client, "backtrace", json!({})).await;
     assert!(bt["frames"][0]["name"].as_str().unwrap().contains("main"));
+
+    let locals = call(&client, "locals", json!({})).await;
+    assert!(locals["scopes"].is_array(), "{locals}");
 
     let exit = call(&client, "continue", json!({})).await;
     assert_eq!(exit, json!({ "state": "exited", "exit_code": 0 }));

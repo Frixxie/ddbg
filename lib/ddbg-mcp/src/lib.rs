@@ -120,6 +120,13 @@ pub struct FrameParams {
     pub frame: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct BacktraceParams {
+    /// Include frames without source, e.g. framework internals (default false).
+    #[serde(default)]
+    pub all: bool,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EvaluateParams {
     /// Expression to evaluate in the selected frame.
@@ -185,10 +192,15 @@ pub struct SessionInfo {
 
 /// A result with a human-readable summary (as the REPL prints it) followed
 /// by the structured value, also serialized as text for clients that
-/// ignore structured content.
+/// ignore structured content. MCP requires structured content to be an
+/// object, so other values are wrapped in `{ "result": ... }`.
 fn ok(summary: Option<String>, value: impl Serialize) -> ToolResult {
     let value =
         serde_json::to_value(value).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let value = match value {
+        Value::Object(_) => value,
+        other => serde_json::json!({ "result": other }),
+    };
     let mut result = CallToolResult::structured(value);
     if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
         result.content.insert(0, ContentBlock::text(s));
@@ -533,30 +545,88 @@ impl DdbgServer {
     #[tool(description = "List breakpoints.")]
     async fn list_breakpoints(&self) -> ToolResult {
         self.command(Command::Breakpoints, |r| match r {
-            Reply::Breakpoints(bps) => {
-                to_value(bps.into_iter().map(BreakpointDto::from).collect::<Vec<_>>())
-            }
+            Reply::Breakpoints(bps) => serde_json::json!({
+                "breakpoints": bps.into_iter().map(BreakpointDto::from).collect::<Vec<_>>(),
+            }),
             other => unexpected(other),
         })
         .await
     }
 
     #[tool(
-        description = "Show the call stack of the selected thread. The program must be stopped."
+        description = "Show the call stack of the selected thread. The program must be stopped. \
+        Frames without source (framework/library internals) are hidden unless `all` is set; \
+        frame indexes stay valid for `select_frame`."
     )]
-    async fn backtrace(&self) -> ToolResult {
-        self.command(Command::Backtrace, |r| match r {
-            Reply::Backtrace { frames, selected } => serde_json::json!({
-                "selected": selected,
-                "frames": frames
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, f)| FrameDto::new(Some(i), f))
-                    .collect::<Vec<_>>(),
-            }),
-            other => unexpected(other),
-        })
-        .await
+    async fn backtrace(&self, Parameters(p): Parameters<BacktraceParams>) -> ToolResult {
+        let mut guard = self.state.lock().await;
+        let Some(st) = guard.as_mut() else {
+            return no_session();
+        };
+        let cmd = Command::Backtrace;
+        let reply = match st.dbg.execute(cmd.clone()).await {
+            Ok(r) => r,
+            Err(e) => return fail(e),
+        };
+        let Reply::Backtrace { frames, selected } = reply else {
+            return ok(None, unexpected(reply));
+        };
+        if p.all {
+            let summary = st.dbg.renderer_mut().reply(
+                &cmd,
+                &Reply::Backtrace {
+                    frames: frames.clone(),
+                    selected,
+                },
+            );
+            let frames: Vec<_> = frames
+                .into_iter()
+                .enumerate()
+                .map(|(i, f)| FrameDto::new(Some(i), f))
+                .collect();
+            return ok(
+                summary,
+                serde_json::json!({ "selected": selected, "frames": frames }),
+            );
+        }
+        let total = frames.len();
+        let mut summary = String::new();
+        let mut shown = Vec::new();
+        let mut hidden_run = 0;
+        for (i, f) in frames.into_iter().enumerate() {
+            if !f.path.as_deref().is_some_and(std::path::Path::exists) && Some(i) != selected {
+                hidden_run += 1;
+                continue;
+            }
+            if hidden_run > 0 {
+                summary.push_str(&format!(
+                    "   ... {hidden_run} frames without local source\n"
+                ));
+                hidden_run = 0;
+            }
+            let marker = if Some(i) == selected { '*' } else { ' ' };
+            let location = match &f.path {
+                Some(path) => format!(" at {}:{}", path.display(), f.line),
+                None => String::new(),
+            };
+            summary.push_str(&format!("{marker}#{i} {}{location}\n", f.name));
+            shown.push(FrameDto::new(Some(i), f));
+        }
+        if hidden_run > 0 {
+            summary.push_str(&format!(
+                "   ... {hidden_run} frames without local source\n"
+            ));
+        }
+        let hidden = total - shown.len();
+        if hidden > 0 {
+            summary.push_str(&format!(
+                "{hidden} of {total} frames without local source hidden; pass `all: true` to show them."
+            ));
+        }
+        ok(
+            Some(summary),
+            serde_json::json!({ "selected": selected, "frames": shown, "hidden": hidden }),
+        )
     }
 
     #[tool(description = "List threads.")]
@@ -639,7 +709,9 @@ impl DdbgServer {
     #[tool(description = "Show variables of the selected frame, grouped by scope.")]
     async fn locals(&self) -> ToolResult {
         self.command(Command::Locals, |r| match r {
-            Reply::Locals(s) => to_value(s.into_iter().map(ScopeDto::from).collect::<Vec<_>>()),
+            Reply::Locals(s) => serde_json::json!({
+                "scopes": s.into_iter().map(ScopeDto::from).collect::<Vec<_>>(),
+            }),
             other => unexpected(other),
         })
         .await
@@ -654,11 +726,13 @@ impl DdbgServer {
         match st.dbg.tests(p.filter.as_deref()).await {
             Ok(tests) => ok(
                 Some(render_list(&tests)),
-                tests
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, t)| TestCaseDto::new(i + 1, t))
-                    .collect::<Vec<_>>(),
+                serde_json::json!({
+                    "tests": tests
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, t)| TestCaseDto::new(i + 1, t))
+                        .collect::<Vec<_>>(),
+                }),
             ),
             Err(e) => fail(e),
         }
@@ -728,7 +802,13 @@ impl ServerHandler for DdbgServer {
              `start_session` with the project directory, set breakpoints, then `run`. \
              Resuming tools return the program state: stopped (with frame), exited, \
              terminated, or running if the timeout passed. While a call waits, `pause`, \
-             `kill` and `end_session` act immediately.",
+             `kill` and `end_session` act immediately.\n\
+             Tools: start_session, end_session, run, continue, next, step, finish, pause, \
+             wait, kill, set_breakpoint, delete_breakpoint, list_breakpoints, backtrace, \
+             threads, select_thread, select_frame, evaluate, set_value, locals, list_tests, \
+             run_test, debug_test, get_output, repl.\n\
+             A failed call (e.g. an expression that cannot be evaluated) returns an error \
+             result; when scripting several calls, handle each failure separately.",
             )
     }
 }

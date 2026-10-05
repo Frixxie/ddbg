@@ -296,6 +296,34 @@ impl BreakpointStore {
             .find(|b| b.adapter_id == Some(adapter_id))
     }
 
+    /// A breakpoint stop proves the breakpoint is bound, even if the adapter
+    /// never sent a `breakpoint` event (netcoredbg binds lazily on module
+    /// load). Marks `hit` verified, or, when the adapter reported no ids,
+    /// the unverified source breakpoints at `at`. Returns changed ids.
+    pub fn mark_hit(
+        &mut self,
+        hit: &[BreakpointId],
+        at: Option<&SourceLocation>,
+    ) -> Vec<BreakpointId> {
+        let mut changed = Vec::new();
+        for bp in self.items.values_mut() {
+            let matches = if hit.is_empty() {
+                matches!((&bp.requested, at), (Location::Source(s), Some(at)) if s == at)
+            } else {
+                hit.contains(&bp.id)
+            };
+            if matches && !bp.verified {
+                bp.verified = true;
+                bp.message = None;
+                if bp.resolved.is_none() {
+                    bp.resolved = at.cloned();
+                }
+                changed.push(bp.id);
+            }
+        }
+        changed
+    }
+
     /// Forget adapter-side state, e.g. when a session ends.
     pub fn reset_resolution(&mut self) {
         for bp in self.items.values_mut() {
