@@ -478,6 +478,23 @@ pub fn parse_summary(stdout: &str) -> Option<TestOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn summary_counts_determine_outcome(passed: u16, failed: u16, skipped: u16) -> bool {
+        let total = u32::from(passed) + u32::from(failed) + u32::from(skipped);
+        let summary = format!(
+            "Test run summary: generated\n  total: {total}\n  failed: {failed}\n  succeeded: {passed}\n  skipped: {skipped}\n"
+        );
+        let expected = if total == 0 || failed > 0 {
+            TestOutcome::Failed
+        } else if passed == 0 {
+            TestOutcome::Ignored
+        } else {
+            TestOutcome::Passed
+        };
+        parse_summary(&summary) == Some(expected)
+    }
 
     const LIST: &str =
         "xUnit.net v3 Microsoft.Testing.Platform v1 Runner v3.2.2+728c1dce01 (64-bit .NET 10.0.12)

@@ -101,7 +101,7 @@ impl<T: PickerItem> Picker<T> {
 
     pub fn move_cursor(&mut self, delta: i64) {
         let max = self.matches().len().saturating_sub(1) as i64;
-        self.cursor = (self.cursor as i64 + delta).clamp(0, max) as usize;
+        self.cursor = (self.cursor as i64).saturating_add(delta).clamp(0, max) as usize;
     }
 
     pub fn push(&mut self, c: char) {
@@ -123,6 +123,90 @@ impl<T: PickerItem> Picker<T> {
 mod tests {
     use super::*;
     use ddbg_test::{ProviderData, ProviderId, TestId};
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn filters_match_all_words_in_item_order(names: Vec<String>, filter: String) -> bool {
+        let mut picker = Picker::with_items(names.iter().map(|name| case(name)).collect());
+        picker.filter = filter.clone();
+        let expected: Vec<_> = names
+            .iter()
+            .filter(|name| {
+                filter
+                    .split_whitespace()
+                    .all(|word| name.to_lowercase().contains(&word.to_lowercase()))
+            })
+            .collect();
+        picker
+            .matches()
+            .iter()
+            .map(|item| &item.name)
+            .collect::<Vec<_>>()
+            == expected
+    }
+
+    #[quickcheck]
+    fn adding_filter_words_only_removes_matches(
+        names: Vec<String>,
+        filter: String,
+        extra: String,
+    ) -> bool {
+        let mut picker = Picker::with_items(names.iter().map(|name| case(name)).collect());
+        picker.filter = filter;
+        let before: Vec<_> = picker
+            .matches()
+            .iter()
+            .map(|item| item.name.clone())
+            .collect();
+        picker.filter.push(' ');
+        picker.filter.push_str(&extra);
+        picker
+            .matches()
+            .iter()
+            .all(|item| before.contains(&item.name))
+    }
+
+    #[quickcheck]
+    fn picker_operations_keep_cursor_in_range(
+        names: Vec<String>,
+        operations: Vec<(u8, char, i64)>,
+    ) -> bool {
+        let mut picker = Picker::with_items(names.iter().map(|name| case(name)).collect());
+        for (kind, character, delta) in operations {
+            match kind % 4 {
+                0 => {
+                    let count = picker.matches().len();
+                    let expected = (picker.cursor as i128 + i128::from(delta))
+                        .clamp(0, count.saturating_sub(1) as i128)
+                        as usize;
+                    picker.move_cursor(delta);
+                    assert_eq!(picker.cursor, expected);
+                }
+                1 => picker.push(character),
+                2 => picker.pop(),
+                _ => picker.set_items(names.iter().rev().map(|name| case(name)).collect()),
+            }
+            let matches = picker.matches();
+            if matches.is_empty() {
+                assert_eq!(picker.cursor, 0);
+                assert!(picker.selected().is_none());
+            } else {
+                assert!(picker.cursor < matches.len());
+                assert_eq!(picker.selected().unwrap().name, matches[picker.cursor].name);
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn extreme_cursor_deltas_are_clamped() {
+        let mut picker = picker();
+        picker.move_cursor(1);
+        picker.move_cursor(i64::MAX);
+        assert_eq!(picker.cursor, 2);
+        picker.move_cursor(i64::MIN);
+        assert_eq!(picker.cursor, 0);
+    }
 
     fn case(name: &str) -> TestCase {
         TestCase {

@@ -167,7 +167,7 @@ pub fn expression_suggestions(line: &str, offset: usize, reply: Reply) -> Vec<Su
         .map(|c| Suggestion {
             value: c.text,
             description: c.kind.filter(|k| !k.is_empty()),
-            span: Span::new(byte(c.start), byte(c.start + c.length)),
+            span: Span::new(byte(c.start), byte(c.start.saturating_add(c.length))),
             append_whitespace: false,
             ..Default::default()
         })
@@ -295,6 +295,87 @@ fn complete_path(word: &str, span: Span, cwd: &Path) -> Vec<Suggestion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ddbg_core::command::Completion;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn completion_spans_follow_utf8_boundaries(
+        prefix: String,
+        expression: String,
+        start: usize,
+        length: usize,
+    ) -> bool {
+        let line = format!("{prefix}{expression}");
+        let count = expression.chars().count();
+        // Cover interior ranges as well as arbitrarily large adapter offsets.
+        [(start, length), (start % (count + 2), length % (count + 2))]
+            .into_iter()
+            .all(|(start, length)| {
+                let suggestions = expression_suggestions(
+                    &line,
+                    prefix.len(),
+                    Reply::Completions(vec![Completion {
+                        label: "replacement".into(),
+                        text: "replacement".into(),
+                        kind: None,
+                        start,
+                        length,
+                    }]),
+                );
+                let span = suggestions[0].span;
+                let byte_start = expression
+                    .chars()
+                    .take(start)
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                let byte_end = expression
+                    .chars()
+                    .take(start.saturating_add(length))
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                span.start == prefix.len() + byte_start
+                    && span.end == prefix.len() + byte_end
+                    && line.get(span.start..span.end).is_some()
+            })
+    }
+
+    #[quickcheck]
+    fn expression_queries_count_characters_not_bytes(expression: String, cursor: usize) -> bool {
+        // Keep the first character non-whitespace so trimming the command
+        // separator cannot trim part of the generated expression.
+        let expression = format!("x{expression}");
+        let cursor = cursor % (expression.chars().count() + 1);
+        let byte_cursor = expression
+            .chars()
+            .take(cursor)
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let line = format!("p\u{2003}{expression}");
+        expression_query(&line, "p\u{2003}".len() + byte_cursor)
+            == Some((
+                "p\u{2003}".len(),
+                Command::Complete {
+                    text: expression,
+                    column: cursor,
+                },
+            ))
+    }
+
+    #[test]
+    fn overflowing_completion_range_is_clamped() {
+        let suggestions = expression_suggestions(
+            "p é😀",
+            2,
+            Reply::Completions(vec![Completion {
+                label: "replacement".into(),
+                text: "replacement".into(),
+                kind: None,
+                start: usize::MAX,
+                length: 1,
+            }]),
+        );
+        assert_eq!(suggestions[0].span, Span::new("p é😀".len(), "p é😀".len()));
+    }
 
     fn completer() -> DdbgCompleter {
         let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

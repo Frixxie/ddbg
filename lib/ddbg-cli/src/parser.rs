@@ -426,6 +426,63 @@ pub fn split_words(s: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn quoted_words_roundtrip(words: Vec<String>) -> bool {
+        // Double quotes preserve empty arguments and whitespace; escape both
+        // characters that have special meaning inside double quotes.
+        let text = words
+            .iter()
+            .map(|word| format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        split_words(&text).unwrap() == words
+    }
+
+    #[quickcheck]
+    fn aliases_parse_like_canonical_commands(rest: String) -> bool {
+        COMMANDS.iter().all(|spec| {
+            let expected = parse(&format!("{} {rest}", spec.name));
+            spec.aliases
+                .iter()
+                .all(|alias| parse(&format!("{alias} {rest}")) == expected)
+        })
+    }
+
+    #[quickcheck]
+    fn outer_whitespace_does_not_change_parsing(text: String) -> bool {
+        parse(&format!(" \t\u{2003}{text}\r\n")) == parse(&text)
+    }
+
+    #[quickcheck]
+    fn source_locations_roundtrip(parts: Vec<u16>, line: u32, windows: bool) -> bool {
+        let parts = parts.iter().map(|n| format!("dir{n}")).collect::<Vec<_>>();
+        let path = if windows {
+            format!(
+                "C:\\{}file.rs",
+                parts.iter().map(|p| format!("{p}\\")).collect::<String>()
+            )
+        } else {
+            format!(
+                "/{}file.rs",
+                parts.iter().map(|p| format!("{p}/")).collect::<String>()
+            )
+        };
+        let location = SourceLocation::new(path, line.max(1));
+        parse_location(&location.to_string()) == Some(Location::Source(location))
+    }
+
+    #[quickcheck]
+    fn qualified_function_locations_roundtrip(parts: Vec<u16>, scoped: bool) -> bool {
+        let name = parts
+            .iter()
+            .map(|n| format!("mod{n}::"))
+            .collect::<String>()
+            + "function";
+        let location = FunctionLocation::new(name, scoped.then(|| "src/file.rs".into()));
+        parse_location(&location.to_string()) == Some(Location::Function(location))
+    }
 
     fn cmd(s: &str) -> Command {
         match parse(s).unwrap() {

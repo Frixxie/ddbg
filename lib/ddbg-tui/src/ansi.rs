@@ -113,6 +113,69 @@ fn basic(n: u16) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn sgr_sequences_preserve_visible_text(parts: Vec<String>, codes: Vec<u8>) -> bool {
+        let mut input = String::new();
+        let mut expected = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            // Literal ESC belongs to the parser's control syntax, not text.
+            let part = part.replace('\x1b', "");
+            let code = codes.get(i).copied().unwrap_or(0);
+            input.push_str(&format!("\x1b[{code}m{part}"));
+            expected.push_str(&part);
+        }
+        let actual: String = line(&input, Style::new())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        actual == expected
+    }
+
+    #[quickcheck]
+    fn sgr_reset_restores_base_style(codes: Vec<u16>, foreground: u8, background: u8) -> bool {
+        let base = Style::new()
+            .fg(Color::Indexed(foreground))
+            .bg(Color::Indexed(background))
+            .add_modifier(Modifier::ITALIC);
+        let codes = codes
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(";");
+        let parsed = line(&format!("\x1b[{codes}mx\x1b[0my"), base);
+        parsed
+            .spans
+            .last()
+            .is_some_and(|span| span.content == "y" && span.style == base)
+    }
+
+    #[quickcheck]
+    fn extended_colors_decode(red: u8, green: u8, blue: u8, index: u8) -> bool {
+        let parsed = line(
+            &format!("\x1b[38;2;{red};{green};{blue};48;5;{index}mx"),
+            Style::new(),
+        );
+        parsed.spans.len() == 1
+            && parsed.spans[0].style.fg == Some(Color::Rgb(red, green, blue))
+            && parsed.spans[0].style.bg == Some(Color::Indexed(index))
+    }
+
+    #[quickcheck]
+    fn malformed_escape_sequences_never_panic(text: String) -> bool {
+        for prefix in [
+            "",
+            "\x1b",
+            "\x1b[",
+            "\x1b[38;2;",
+            "\x1b[999999999999999999;",
+        ] {
+            let _ = line(&format!("{prefix}{text}"), Style::new());
+        }
+        true
+    }
 
     #[test]
     fn parses_sgr() {

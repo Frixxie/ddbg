@@ -18,3 +18,5 @@ syntect.workspace = true
 
 [dev-dependencies]
 ddbg-test.workspace = true
+quickcheck.workspace = true
+quickcheck_macros.workspace = true

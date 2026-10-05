@@ -1414,13 +1414,49 @@ fn array_length_of(value: &str) -> Option<u64> {
         let dims = group.strip_suffix(']')?;
         dims.split(',')
             .map(|d| d.trim().parse::<u64>().ok())
-            .try_fold(1u64, |acc, d| Some(acc * d?))
+            .try_fold(1u64, |acc, d| acc.checked_mul(d?))
     })
 }
 
 #[cfg(test)]
 mod array_length_tests {
     use super::array_length_of;
+    use quickcheck_macros::quickcheck;
+
+    fn array_value(dimensions: &[u64]) -> String {
+        let dimensions = dimensions
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{int[{dimensions}]}}")
+    }
+
+    #[quickcheck]
+    fn array_dimensions_have_checked_product(first: u64, rest: Vec<u64>) -> bool {
+        let dimensions: Vec<_> = std::iter::once(first).chain(rest).collect();
+        let expected = dimensions
+            .iter()
+            .try_fold(1u64, |product, &n| product.checked_mul(n));
+        array_length_of(&array_value(&dimensions)) == expected
+    }
+
+    #[quickcheck]
+    fn zero_dimension_gives_zero(rest: Vec<u64>) -> bool {
+        let dimensions: Vec<_> = std::iter::once(0).chain(rest).collect();
+        array_length_of(&array_value(&dimensions)) == Some(0)
+    }
+
+    #[quickcheck]
+    fn malformed_dimensions_are_rejected(number: u64) -> bool {
+        array_length_of(&format!("{{int[{number}, invalid]}}")).is_none()
+            && array_length_of(&format!("{{int[-{number}]}}")).is_none()
+    }
+
+    #[test]
+    fn overflowing_dimensions_are_rejected() {
+        assert_eq!(array_length_of("{int[18446744073709551615, 2]}"), None);
+    }
 
     #[test]
     fn parses_array_values() {
@@ -1480,6 +1516,52 @@ fn evaluate_error(expression: &str, e: anyhow::Error) -> anyhow::Error {
 #[cfg(test)]
 mod evaluate_error_tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn member_chains_split_at_top_level(accesses: Vec<(u8, u16)>) -> bool {
+        let mut expression = String::from("root");
+        let mut expected_prefixes = Vec::new();
+        let mut expected_lvalue = None;
+        for (kind, number) in accesses {
+            let parent = expression.clone();
+            let member = match kind % 4 {
+                0 | 1 => {
+                    expected_prefixes.push(parent.clone());
+                    let member = format!("member{number}");
+                    expression.push_str(if kind % 4 == 0 { "." } else { "->" });
+                    expression.push_str(&member);
+                    member
+                }
+                2 => {
+                    let index = format!("indices[{number}]");
+                    expression.push_str(&format!("[{index}]"));
+                    index
+                }
+                _ => {
+                    // Member access inside a call must not create a prefix.
+                    let index = format!("lookup(item.member{number})");
+                    expression.push_str(&format!("[{index}]"));
+                    index
+                }
+            };
+            expected_lvalue = Some((parent, member));
+        }
+        let actual_prefixes: Vec<_> = member_prefixes(&expression)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let actual_lvalue = split_lvalue(&expression)
+            .map(|(parent, member)| (parent.to_owned(), member.to_owned()));
+        actual_prefixes == expected_prefixes && actual_lvalue == expected_lvalue
+    }
+
+    #[quickcheck]
+    fn quoted_member_access_is_not_a_prefix(number: u16, arrow: bool) -> bool {
+        let parent = format!("root[\"key.{number}->value\"]");
+        let expression = format!("{parent}{}member", if arrow { "->" } else { "." });
+        member_prefixes(&expression) == vec![parent.as_str()]
+    }
 
     #[test]
     fn names_expression_and_explains_hresult() {
@@ -1508,6 +1590,38 @@ mod evaluate_error_tests {
 #[cfg(test)]
 mod lvalue_tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn character_offsets_roundtrip_through_utf16(text: String, offset: usize) -> bool {
+        let offset = offset % (text.chars().count() + 1);
+        char_offset(&text, utf16_len(&text, offset)) == offset
+    }
+
+    #[quickcheck]
+    fn utf16_offsets_round_up_to_character_boundaries(text: String, units: usize) -> bool {
+        let total = text.encode_utf16().count();
+        [units, units % (total + 2)].into_iter().all(|units| {
+            let offset = char_offset(&text, units);
+            let boundary = utf16_len(&text, offset);
+            offset <= text.chars().count()
+                && boundary >= units.min(total)
+                && (offset == 0 || utf16_len(&text, offset - 1) < units.min(total))
+        })
+    }
+
+    #[quickcheck]
+    fn token_start_finds_trailing_identifier(text: String, column: usize) -> bool {
+        let column = column % (text.chars().count() + 2);
+        let prefix: Vec<_> = text.chars().take(column).collect();
+        let is_identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+        let trailing = prefix
+            .iter()
+            .rev()
+            .take_while(|&&c| is_identifier(c))
+            .count();
+        token_start(&text, column) == prefix.len() - trailing
+    }
 
     #[test]
     fn splits_lvalues() {

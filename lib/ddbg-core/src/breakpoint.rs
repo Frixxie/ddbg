@@ -384,6 +384,101 @@ fn normalize(path: &Path, base: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn duplicate_locations_preserve_ids(name: String, line: u32, function: bool) -> bool {
+        let mut store = BreakpointStore::default();
+        let location = if function {
+            func(&name, Some("src/file.rs"))
+        } else {
+            src("/ddbg-quickcheck/file.rs", line.max(1))
+        };
+        let base = Path::new("/");
+        let (id, added) = store.add(location.clone(), base);
+        added && store.add(location, base) == (id, false) && store.iter().count() == 1
+    }
+
+    #[quickcheck]
+    fn requests_partition_source_and_function_breakpoints(
+        entries: Vec<(u8, u16, Option<String>)>,
+    ) -> bool {
+        let mut store = BreakpointStore::default();
+        let mut sources = BTreeMap::<PathBuf, Vec<(u32, Option<String>)>>::new();
+        let mut functions = Vec::new();
+        for (kind, number, condition) in entries {
+            let location = if kind.is_multiple_of(2) {
+                src(
+                    &format!("/ddbg-quickcheck/file{}.rs", kind % 4),
+                    u32::from(number) + 1,
+                )
+            } else {
+                func(&format!("function{number}"), None)
+            };
+            let (id, added) = store.add(location.clone(), Path::new("/"));
+            if !added {
+                continue;
+            }
+            store.set_condition(id, condition.clone());
+            match location {
+                Location::Source(source) => sources
+                    .entry(source.path)
+                    .or_default()
+                    .push((source.line, condition)),
+                Location::Function(function) => functions.push((function.name, condition)),
+            }
+        }
+        assert_eq!(store.files(), sources.keys().cloned().collect::<Vec<_>>());
+        for (path, expected) in sources {
+            let actual: Vec<_> = store
+                .request_for(&path)
+                .breakpoints
+                .into_iter()
+                .map(|b| (b.line as u32, b.condition))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        let actual: Vec<_> = store
+            .function_request()
+            .breakpoints
+            .into_iter()
+            .map(|b| (b.name, b.condition))
+            .collect();
+        assert_eq!(actual, functions);
+        assert!(
+            store
+                .request_for(Path::new("/ddbg-quickcheck/missing.rs"))
+                .breakpoints
+                .is_empty()
+        );
+        true
+    }
+
+    #[quickcheck]
+    fn resetting_resolution_preserves_configuration(conditions: Vec<Option<String>>) -> bool {
+        let mut store = BreakpointStore::default();
+        for (i, condition) in conditions.into_iter().enumerate() {
+            let location = if i.is_multiple_of(2) {
+                src("/ddbg-quickcheck/file.rs", i as u32 + 1)
+            } else {
+                func(&format!("function{i}"), None)
+            };
+            let (id, _) = store.add(location, Path::new("/"));
+            store.set_condition(id, condition);
+        }
+        let expected: Vec<_> = store.iter().cloned().collect();
+        let results: Vec<_> = expected
+            .iter()
+            .enumerate()
+            .map(|(i, _)| resolved(i as i64, "/ddbg-quickcheck/resolved.rs", 42))
+            .collect();
+        store.apply_results(Path::new("/ddbg-quickcheck/file.rs"), &results);
+        store.apply_function_results(&results);
+        store.reset_resolution();
+        assert_eq!(store.iter().cloned().collect::<Vec<_>>(), expected);
+        store.reset_resolution();
+        store.iter().cloned().collect::<Vec<_>>() == expected
+    }
 
     fn src(path: &str, line: u32) -> Location {
         Location::Source(SourceLocation::new(path, line))

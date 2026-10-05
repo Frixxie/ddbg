@@ -292,6 +292,48 @@ pub fn parse_run(stdout: &str) -> HashMap<&str, TestOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn generated_test_lists_roundtrip(names: Vec<Vec<u16>>) -> bool {
+        let names: Vec<_> = names
+            .iter()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .map(|n| format!("module{n}::"))
+                    .collect::<String>()
+                    + "test"
+            })
+            .collect();
+        let output = names
+            .iter()
+            .map(|name| format!("{name}: test\n"))
+            .collect::<String>()
+            + "bench: benchmark\n\nsummary\n";
+        parse_list(&output) == names
+    }
+
+    #[quickcheck]
+    fn generated_test_outcomes_roundtrip(statuses: Vec<u8>) -> bool {
+        let mut output = String::from("running tests\n");
+        let mut expected = HashMap::new();
+        for (i, status) in statuses.into_iter().enumerate() {
+            let (word, outcome) = match status % 3 {
+                0 => ("ok", TestOutcome::Passed),
+                1 => ("FAILED", TestOutcome::Failed),
+                _ => ("ignored, slow", TestOutcome::Ignored),
+            };
+            let name = format!("module::test{i}");
+            output.push_str(&format!("test {name} ... {word}\n"));
+            expected.insert(name, outcome);
+        }
+        let actual: HashMap<_, _> = parse_run(&output)
+            .into_iter()
+            .map(|(name, outcome)| (name.to_owned(), outcome))
+            .collect();
+        actual == expected
+    }
 
     #[test]
     fn parses_build_artifacts() {

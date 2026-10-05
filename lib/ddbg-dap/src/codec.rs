@@ -105,7 +105,93 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Event, Message};
+    use crate::protocol::{Event, Message, Request, Response};
+    use quickcheck_macros::quickcheck;
+
+    // Exercise every envelope kind, optional payloads, and arbitrary UTF-8.
+    fn message(kind: u8, seq: i64, name: String, payload: Option<String>) -> Message {
+        let body = payload.map(|text| serde_json::json!({ "text": text }));
+        match kind % 3 {
+            0 => Message::Request(Request {
+                seq,
+                command: name,
+                arguments: body,
+            }),
+            1 => Message::Response(Response {
+                seq,
+                request_seq: seq,
+                success: kind.is_multiple_of(2),
+                command: name,
+                message: None,
+                body,
+            }),
+            _ => Message::Event(Event {
+                seq,
+                event: name,
+                body,
+            }),
+        }
+    }
+
+    #[quickcheck]
+    fn arbitrary_messages_roundtrip(
+        kind: u8,
+        seq: i64,
+        name: String,
+        payload: Option<String>,
+    ) -> bool {
+        let expected = message(kind, seq, name, payload);
+        let bytes = encode(&expected).unwrap();
+        let mut decoder = Decoder::new();
+        decoder.extend(&bytes);
+        decoder.decode().unwrap() == Some(expected)
+            && decoder.decode().unwrap().is_none()
+            && decoder.buffered() == 0
+    }
+
+    #[quickcheck]
+    fn chunk_boundaries_preserve_message_order(
+        inputs: Vec<(u8, i64, String, Option<String>)>,
+        chunks: Vec<u8>,
+    ) -> bool {
+        let expected: Vec<_> = inputs
+            .into_iter()
+            .map(|(kind, seq, name, payload)| message(kind, seq, name, payload))
+            .collect();
+        let bytes: Vec<_> = expected
+            .iter()
+            .flat_map(|msg| encode(msg).unwrap())
+            .collect();
+        let mut decoder = Decoder::new();
+        let mut actual = Vec::new();
+        let mut offset = 0;
+        // Always make progress, even when the generated chunk schedule is empty.
+        for size in chunks.into_iter().chain(std::iter::repeat(0)) {
+            if offset == bytes.len() {
+                break;
+            }
+            let end = (offset + usize::from(size) + 1).min(bytes.len());
+            decoder.extend(&bytes[offset..end]);
+            while let Some(msg) = decoder.decode().unwrap() {
+                actual.push(msg);
+            }
+            offset = end;
+        }
+        actual == expected && decoder.buffered() == 0 && decoder.decode().unwrap().is_none()
+    }
+
+    #[quickcheck]
+    fn invalid_json_does_not_consume_next_message(name: String, payload: Option<String>) -> bool {
+        let expected = message(2, 1, name, payload);
+        let mut bytes = frame("!");
+        bytes.extend(encode(&expected).unwrap());
+        let mut decoder = Decoder::new();
+        decoder.extend(&bytes);
+        decoder.decode().is_err()
+            && decoder.decode().unwrap() == Some(expected)
+            && decoder.decode().unwrap().is_none()
+            && decoder.buffered() == 0
+    }
 
     fn frame(body: &str) -> Vec<u8> {
         let mut v = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();

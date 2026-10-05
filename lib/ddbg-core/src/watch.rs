@@ -95,6 +95,68 @@ impl WatchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    #[quickcheck]
+    fn operations_match_reference_model(operations: Vec<(u8, String, u8)>) -> bool {
+        let mut store = WatchStore::default();
+        let mut model = BTreeMap::<WatchId, Watch>::new();
+        let mut next_id = 0;
+        for (operation, text, selected) in operations {
+            // Target allocated IDs as well as unknown/removed ones, rather
+            // than spending most generated operations on nonexistent watches.
+            let id = WatchId(u32::from(selected) % (next_id + 2));
+            match operation % 4 {
+                0 => {
+                    let expected = match model.values().find(|w| w.expression == text) {
+                        Some(watch) => (watch.id, false),
+                        None => {
+                            next_id += 1;
+                            let id = WatchId(next_id);
+                            model.insert(
+                                id,
+                                Watch {
+                                    id,
+                                    expression: text.clone(),
+                                    result: None,
+                                },
+                            );
+                            (id, true)
+                        }
+                    };
+                    assert_eq!(store.add(text), expected);
+                }
+                1 => assert_eq!(store.remove(id), model.remove(&id)),
+                2 => {
+                    let result = if selected.is_multiple_of(2) {
+                        Ok(WatchValue {
+                            value: text,
+                            type_name: None,
+                            has_children: false,
+                        })
+                    } else {
+                        Err(text)
+                    };
+                    store.set_result(id, result.clone());
+                    if let Some(watch) = model.get_mut(&id) {
+                        watch.result = Some(result);
+                    }
+                }
+                _ => {
+                    store.invalidate();
+                    for watch in model.values_mut() {
+                        watch.result = None;
+                    }
+                }
+            }
+            assert_eq!(
+                store.snapshot(),
+                model.values().cloned().collect::<Vec<_>>()
+            );
+            assert_eq!(store.get(id), model.get(&id));
+        }
+        true
+    }
 
     #[test]
     fn duplicates_keep_ids_and_invalidation_keeps_expressions() {

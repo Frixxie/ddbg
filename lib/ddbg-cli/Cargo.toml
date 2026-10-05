@@ -22,3 +22,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 syntect.workspace = true
+
+[dev-dependencies]
+quickcheck.workspace = true
+quickcheck_macros.workspace = true
