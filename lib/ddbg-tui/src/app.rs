@@ -172,6 +172,7 @@ mod tests {
                 frame: None,
                 exception: None,
                 elapsed: Some(Duration::from_millis(ms)),
+                watches: Vec::new(),
             }))
         };
         app.debug_event(DebugEvent::SessionStarted);
@@ -189,6 +190,36 @@ mod tests {
         );
         app.debug_event(DebugEvent::SessionStarted);
         assert_eq!(app.bp_interval, None);
+    }
+
+    #[tokio::test]
+    async fn watch_pane_tracks_replies_refreshes_and_resume() {
+        use ddbg_core::watch::{Watch, WatchId, WatchValue};
+        let mut app = test_app();
+        let w = Watch {
+            id: WatchId(1),
+            expression: "x".into(),
+            result: Some(Ok(WatchValue {
+                value: "42".into(),
+                type_name: None,
+                has_children: false,
+            })),
+        };
+        app.apply_reply(Reply::WatchSet {
+            watch: w.clone(),
+            new: true,
+        });
+        app.apply_reply(Reply::WatchSet {
+            watch: w.clone(),
+            new: false,
+        });
+        assert_eq!(app.watches.len(), 1);
+        app.debug_event(DebugEvent::SessionContinued);
+        assert!(app.watches[0].result.is_none());
+        app.debug_event(DebugEvent::WatchesChanged(vec![w.clone()]));
+        assert_eq!(app.watches, vec![w]);
+        app.apply_reply(Reply::WatchDeleted(WatchId(1)));
+        assert!(app.watches.is_empty());
     }
 
     #[tokio::test]
@@ -342,6 +373,7 @@ pub struct App {
     /// Run time between the previous and the current breakpoint hit.
     pub bp_interval: Option<BpInterval>,
     pub breakpoints: Vec<Breakpoint>,
+    pub watches: Vec<ddbg_core::watch::Watch>,
 
     pub log: Vec<String>,
     /// Lines scrolled up from the bottom of the log.
@@ -408,6 +440,7 @@ impl App {
             last_hit: None,
             bp_interval: None,
             breakpoints: Vec::new(),
+            watches: Vec::new(),
             log: Vec::new(),
             log_scroll: 0,
             input: None,
@@ -452,6 +485,9 @@ impl App {
     }
 
     fn clear_stopped(&mut self) {
+        for w in &mut self.watches {
+            w.result = None;
+        }
         self.stack.clear();
         self.selected_frame = None;
         self.locals.clear();
@@ -497,6 +533,7 @@ impl App {
                 self.clear_stopped();
             }
             DebugEvent::SessionStopped(info) => {
+                self.watches = info.watches.clone();
                 self.status = Status::Stopped;
                 self.exception = info.exception.clone();
                 self.elapsed = info.elapsed;
@@ -517,12 +554,16 @@ impl App {
                 self.clear_stopped();
             }
             DebugEvent::FrameChanged => {
+                for w in &mut self.watches {
+                    w.result = None;
+                }
                 self.locals.clear();
                 self.locals_cursor = 0;
                 self.value_scroll = None;
                 self.refresh_stopped();
             }
             DebugEvent::VariablesChanged => self.execute_silent(Command::Locals),
+            DebugEvent::WatchesChanged(watches) => self.watches = watches.clone(),
             DebugEvent::BreakpointChanged(_) => self.refresh_breakpoints(),
             DebugEvent::ThreadsChanged | DebugEvent::Output(_) => {}
         }
@@ -620,6 +661,15 @@ impl App {
                 self.value_scroll = None;
             }
             Reply::Breakpoints(bps) => self.breakpoints = bps,
+            Reply::Watches(watches) => self.watches = watches,
+            Reply::WatchSet { watch, .. } => {
+                if let Some(w) = self.watches.iter_mut().find(|w| w.id == watch.id) {
+                    *w = watch;
+                } else {
+                    self.watches.push(watch);
+                }
+            }
+            Reply::WatchDeleted(id) => self.watches.retain(|w| w.id != id),
             Reply::BreakpointSet { .. } | Reply::BreakpointDeleted(_) => self.refresh_breakpoints(),
             _ => {}
         }

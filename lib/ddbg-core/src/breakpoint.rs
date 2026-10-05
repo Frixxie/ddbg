@@ -91,6 +91,7 @@ impl fmt::Display for Location {
 pub struct Breakpoint {
     pub id: BreakpointId,
     pub requested: Location,
+    pub condition: Option<String>,
     pub resolved: Option<SourceLocation>,
     pub verified: bool,
     pub message: Option<String>,
@@ -151,6 +152,7 @@ impl BreakpointStore {
             Breakpoint {
                 id,
                 requested: location,
+                condition: None,
                 resolved: None,
                 verified: false,
                 message: None,
@@ -166,6 +168,12 @@ impl BreakpointStore {
 
     pub fn get(&self, id: BreakpointId) -> Option<&Breakpoint> {
         self.items.get(&id)
+    }
+
+    pub fn set_condition(&mut self, id: BreakpointId, condition: Option<String>) {
+        if let Some(bp) = self.items.get_mut(&id) {
+            bp.condition = condition;
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Breakpoint> {
@@ -217,7 +225,7 @@ impl BreakpointStore {
                 .filter_map(|b| match &b.requested {
                     Location::Function(f) => Some(dap::FunctionBreakpoint {
                         name: f.name.clone(),
-                        condition: None,
+                        condition: b.condition.clone(),
                     }),
                     Location::Source(_) => None,
                 })
@@ -260,7 +268,7 @@ impl BreakpointStore {
                     Location::Source(s) => Some(dap::SourceBreakpoint {
                         line: s.line.into(),
                         column: None,
-                        condition: None,
+                        condition: b.condition.clone(),
                     }),
                     Location::Function(_) => None,
                 })
@@ -452,6 +460,24 @@ mod tests {
         let req = s.request_for(Path::new("/src/a.rs"));
         let lines: Vec<_> = req.breakpoints.iter().map(|b| b.line).collect();
         assert_eq!(lines, [10, 20]);
+    }
+
+    #[test]
+    fn conditions_are_sent_for_source_and_function_breakpoints_and_survive_reset() {
+        let mut s = store();
+        s.set_condition(BreakpointId(1), Some("x > 2".into()));
+        let (id, _) = s.add(func("parse", None), Path::new("/"));
+        s.set_condition(id, Some("input != 0".into()));
+        s.reset_resolution();
+        let req = s.request_for(Path::new("/src/a.rs"));
+        assert_eq!(req.breakpoints[0].condition.as_deref(), Some("x > 2"));
+        assert_eq!(req.breakpoints[1].condition, None);
+        assert_eq!(
+            s.function_request().breakpoints[0].condition.as_deref(),
+            Some("input != 0")
+        );
+        s.set_condition(id, None);
+        assert_eq!(s.function_request().breakpoints[0].condition, None);
     }
 
     #[test]

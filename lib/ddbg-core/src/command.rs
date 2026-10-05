@@ -6,6 +6,7 @@ use crate::frame::StackFrame;
 use crate::target::LaunchTarget;
 use crate::thread::{Thread, ThreadId};
 use crate::variable::{Evaluation, VarRef, Variable};
+use crate::watch::{Watch, WatchId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -20,6 +21,16 @@ pub enum Command {
     Finish,
 
     Break(Location),
+    /// Set a breakpoint with an adapter-native condition.
+    ConditionalBreak {
+        location: Location,
+        condition: String,
+    },
+    /// Change a breakpoint's condition, or clear it with `None`.
+    Condition {
+        id: BreakpointId,
+        condition: Option<String>,
+    },
     DeleteBreakpoint(BreakpointId),
     Breakpoints,
 
@@ -29,6 +40,10 @@ pub enum Command {
     Frame(FrameSelector),
 
     Print(String),
+    /// Keep an expression and evaluate it in the selected frame at each stop.
+    Watch(String),
+    Unwatch(WatchId),
+    Watches,
     /// Evaluate in the adapter's REPL context (may have side effects).
     Eval(String),
     /// Assign `value` to the l-value expression `target`.
@@ -108,6 +123,12 @@ pub enum Reply {
     },
     /// An evaluated expression and (one level of) its children.
     Value(Evaluation, Vec<Variable>),
+    WatchSet {
+        watch: Watch,
+        new: bool,
+    },
+    WatchDeleted(WatchId),
+    Watches(Vec<Watch>),
     Locals(Vec<ScopeVariables>),
     Completions(Vec<Completion>),
     Quit,

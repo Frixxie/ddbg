@@ -9,6 +9,7 @@ use crate::frame::StackFrame;
 use crate::target::DebugTarget;
 use crate::thread::{Thread, ThreadId};
 use crate::variable::{Scope, VarRef, Variable};
+use crate::watch::WatchStore;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -80,6 +81,7 @@ pub struct DebugSession {
     pub capabilities: Capabilities,
 
     pub breakpoints: BreakpointStore,
+    pub watches: WatchStore,
 
     pub threads: Vec<Thread>,
     pub selected_thread: Option<ThreadId>,
@@ -122,6 +124,7 @@ impl DebugSession {
         self.selected_frame = None;
         self.scopes.clear();
         self.variable_cache.clear();
+        self.watches.invalidate();
     }
 
     /// Reset per-run state when a debuggee goes away.

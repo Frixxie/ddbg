@@ -42,6 +42,7 @@ use ddbg_core::event::{OutputCategory, StopInfo};
 use ddbg_core::frame::StackFrame;
 use ddbg_core::thread::{Thread, ThreadId};
 use ddbg_core::variable::{Evaluation, Variable};
+use ddbg_core::watch::{Watch, WatchId};
 use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
 use tokio::sync::broadcast::{self, error::RecvError, error::TryRecvError};
 
@@ -357,7 +358,39 @@ impl Debugger {
         }
     }
 
+    /// Set a source or function breakpoint with an adapter-native condition.
+    pub async fn break_if(
+        &mut self,
+        location: Location,
+        condition: impl Into<String>,
+    ) -> Result<Breakpoint> {
+        match self
+            .execute(Command::ConditionalBreak {
+                location,
+                condition: condition.into(),
+            })
+            .await?
+        {
+            Reply::BreakpointSet { breakpoint, .. } => Ok(breakpoint),
+            other => unexpected(other),
+        }
+    }
+
+    /// Change a breakpoint's condition; `None` makes it unconditional.
+    pub async fn condition(
+        &mut self,
+        id: BreakpointId,
+        condition: Option<String>,
+    ) -> Result<Breakpoint> {
+        match self.execute(Command::Condition { id, condition }).await? {
+            Reply::BreakpointSet { breakpoint, .. } => Ok(breakpoint),
+            other => unexpected(other),
+        }
+    }
+
     /// `delete <id>`
+    ///
+    /// Watch expressions are managed separately with `unwatch`.
     pub async fn delete(&mut self, id: BreakpointId) -> Result<()> {
         self.execute(Command::DeleteBreakpoint(id)).await.map(drop)
     }
@@ -368,6 +401,27 @@ impl Debugger {
             Reply::Breakpoints(bps) => Ok(bps),
             other => unexpected(other),
         }
+    }
+
+    /// `watch <expression>`: add an expression, evaluating it if stopped.
+    pub async fn watch(&mut self, expression: impl Into<String>) -> Result<Watch> {
+        match self.execute(Command::Watch(expression.into())).await? {
+            Reply::WatchSet { watch, .. } => Ok(watch),
+            other => unexpected(other),
+        }
+    }
+
+    /// `watches`: current summaries, without re-evaluating expressions.
+    pub async fn watches(&mut self) -> Result<Vec<Watch>> {
+        match self.execute(Command::Watches).await? {
+            Reply::Watches(watches) => Ok(watches),
+            other => unexpected(other),
+        }
+    }
+
+    /// `unwatch <id>`
+    pub async fn unwatch(&mut self, id: WatchId) -> Result<()> {
+        self.execute(Command::Unwatch(id)).await.map(drop)
     }
 
     /// `backtrace`

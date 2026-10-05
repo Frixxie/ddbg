@@ -71,6 +71,10 @@ async fn lists_tools_and_identifies_as_ddbg() {
         "run",
         "continue",
         "set_breakpoint",
+        "set_breakpoint_condition",
+        "add_watch",
+        "list_watches",
+        "remove_watch",
         "evaluate",
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
@@ -125,6 +129,73 @@ async fn list_results_are_objects() {
     client.cancel().await.unwrap();
 }
 
+#[tokio::test]
+async fn conditional_breakpoints_can_be_configured_and_edited_before_launch() {
+    let client = connect().await;
+    call(
+        &client,
+        "start_session",
+        json!({ "cwd": fixture("hello-python") }),
+    )
+    .await;
+    let result = call_raw(
+        &client,
+        "set_breakpoint",
+        json!({ "file": "main.py", "line": 18, "condition": "count > 2" }),
+    )
+    .await;
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["condition"],
+        "count > 2"
+    );
+    assert!(summary(&result).contains("if count > 2"));
+    let edited = call(
+        &client,
+        "set_breakpoint_condition",
+        json!({ "id": 1, "condition": "count == 7" }),
+    )
+    .await;
+    assert_eq!(edited["condition"], "count == 7");
+    let bps = call(&client, "list_breakpoints", json!({})).await;
+    assert_eq!(bps["breakpoints"][0]["condition"], "count == 7");
+    let cleared = call(&client, "set_breakpoint_condition", json!({ "id": 1 })).await;
+    assert!(cleared["condition"].is_null());
+    let function = call(
+        &client,
+        "set_breakpoint",
+        json!({ "function": "add", "condition": "a == 3" }),
+    )
+    .await;
+    assert_eq!(function["kind"], "function");
+    assert_eq!(function["condition"], "a == 3");
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn watches_can_be_managed_before_launch() {
+    let client = connect().await;
+    call(
+        &client,
+        "start_session",
+        json!({"cwd": fixture("hello-python")}),
+    )
+    .await;
+    let w = call(&client, "add_watch", json!({"expression": "x + 1"})).await;
+    assert_eq!(w["id"], 1);
+    assert_eq!(w["expression"], "x + 1");
+    assert!(w["value"].is_null());
+    assert!(w["error"].is_null());
+    call(&client, "add_watch", json!({"expression": "x + 1"})).await;
+    let watches = call(&client, "list_watches", json!({})).await;
+    assert_eq!(watches["watches"].as_array().unwrap().len(), 1);
+    call(&client, "remove_watch", json!({"id": 1})).await;
+    let watches = call(&client, "list_watches", json!({})).await;
+    assert!(watches["watches"].as_array().unwrap().is_empty());
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires lldb-dap"]
 async fn debug_rust_program() {
@@ -149,11 +220,22 @@ async fn debug_rust_program() {
     .await;
     assert_eq!(bp["id"], 1);
 
+    call(&client, "add_watch", json!({"expression": "point.x"})).await;
+    call(
+        &client,
+        "add_watch",
+        json!({"expression": "missing_variable"}),
+    )
+    .await;
+
     let result = call_raw(&client, "run", json!({})).await;
     let stop = result.structured_content.clone().unwrap();
     assert_eq!(stop["state"], "stopped", "{stop}");
     assert_eq!(stop["frame"]["line"], 14);
+    assert_eq!(stop["watches"][0]["value"], "3");
+    assert!(stop["watches"][1]["error"].is_string());
     assert!(summary(&result).contains("add(point.x"), "{result:?}");
+    assert!(summary(&result).contains("Watch 1: point.x = 3"));
 
     let result = call_raw(&client, "evaluate", json!({ "expression": "point.x" })).await;
     assert_eq!(result.structured_content.as_ref().unwrap()["value"], "3");

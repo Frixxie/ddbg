@@ -107,11 +107,26 @@ pub struct SetBreakpointParams {
     pub line: Option<u32>,
     /// Function name for a function breakpoint.
     pub function: Option<String>,
+    /// Adapter-native expression; execution stops only when it is true.
+    pub condition: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetBreakpointConditionParams {
+    pub id: u32,
+    /// New adapter-native condition. Omit to make the breakpoint unconditional.
+    pub condition: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
     pub id: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WatchParams {
+    /// Adapter-native expression, evaluated in the selected frame at each stop.
+    pub expression: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -508,7 +523,7 @@ impl DdbgServer {
 
     #[tool(
         description = "Set a breakpoint at `file`+`line`, or on `function` (optionally \
-        scoped to `file`). Can be set before the program runs."
+        scoped to `file`), with an optional adapter-native `condition`. Can be set before the program runs."
     )]
     async fn set_breakpoint(&self, Parameters(p): Parameters<SetBreakpointParams>) -> ToolResult {
         let location = match (p.file, p.line, p.function) {
@@ -523,7 +538,14 @@ impl DdbgServer {
                 ));
             }
         };
-        self.command(Command::Break(location), |r| match r {
+        let cmd = match p.condition {
+            Some(condition) => Command::ConditionalBreak {
+                location,
+                condition,
+            },
+            None => Command::Break(location),
+        };
+        self.command(cmd, |r| match r {
             Reply::BreakpointSet { breakpoint, .. } => to_value(BreakpointDto::from(breakpoint)),
             other => unexpected(other),
         })
@@ -542,6 +564,26 @@ impl DdbgServer {
         .await
     }
 
+    #[tool(description = "Change a breakpoint's condition by id. Omit `condition` to clear it.")]
+    async fn set_breakpoint_condition(
+        &self,
+        Parameters(p): Parameters<SetBreakpointConditionParams>,
+    ) -> ToolResult {
+        self.command(
+            Command::Condition {
+                id: BreakpointId(p.id),
+                condition: p.condition,
+            },
+            |r| match r {
+                Reply::BreakpointSet { breakpoint, .. } => {
+                    to_value(BreakpointDto::from(breakpoint))
+                }
+                other => unexpected(other),
+            },
+        )
+        .await
+    }
+
     #[tool(description = "List breakpoints.")]
     async fn list_breakpoints(&self) -> ToolResult {
         self.command(Command::Breakpoints, |r| match r {
@@ -550,6 +592,41 @@ impl DdbgServer {
             }),
             other => unexpected(other),
         })
+        .await
+    }
+
+    #[tool(
+        description = "Add a watch expression. Refreshes at each stop, frame/thread change and assignment. Does not stop execution on writes. Avoid expressions with side effects."
+    )]
+    async fn add_watch(&self, Parameters(p): Parameters<WatchParams>) -> ToolResult {
+        self.command(Command::Watch(p.expression), |r| match r {
+            Reply::WatchSet { watch, .. } => to_value(WatchDto::from(watch)),
+            other => unexpected(other),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List watch expressions and their current summaries or evaluation errors. Values are unavailable while the program is not stopped."
+    )]
+    async fn list_watches(&self) -> ToolResult {
+        self.command(Command::Watches, |r| match r {
+            Reply::Watches(watches) => serde_json::json!({ "watches": watches.into_iter().map(WatchDto::from).collect::<Vec<_>>() }),
+            other => unexpected(other),
+        }).await
+    }
+
+    #[tool(
+        description = "Remove a watch expression by id. Watch ids are separate from breakpoint ids."
+    )]
+    async fn remove_watch(&self, Parameters(p): Parameters<IdParams>) -> ToolResult {
+        let Ok(id) = u32::try_from(p.id) else {
+            return Err(ErrorData::invalid_params("invalid watch id", None));
+        };
+        self.command(
+            Command::Unwatch(ddbg_core::watch::WatchId(id)),
+            |_| serde_json::json!({ "deleted": id }),
+        )
         .await
     }
 
@@ -804,8 +881,8 @@ impl ServerHandler for DdbgServer {
              terminated, or running if the timeout passed. While a call waits, `pause`, \
              `kill` and `end_session` act immediately.\n\
              Tools: start_session, end_session, run, continue, next, step, finish, pause, \
-             wait, kill, set_breakpoint, delete_breakpoint, list_breakpoints, backtrace, \
-             threads, select_thread, select_frame, evaluate, set_value, locals, list_tests, \
+              wait, kill, set_breakpoint, set_breakpoint_condition, delete_breakpoint, list_breakpoints, backtrace, \
+              threads, select_thread, select_frame, evaluate, set_value, locals, add_watch, list_watches, remove_watch, list_tests, \
              run_test, debug_test, get_output, repl.\n\
              A failed call (e.g. an expression that cannot be evaluated) returns an error \
              result; when scripting several calls, handle each failure separately.",

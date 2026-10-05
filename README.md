@@ -164,12 +164,17 @@ Process exited normally.
 | `finish` | `fin` | Step out |
 | `break <file>:<line>` | `b` | Set a breakpoint at a line |
 | `break [<file>:]<function>` | `b` | Set a function breakpoint, optionally only in `<file>` |
+| `break <location> if <expr>` | `b` | Set a source or function breakpoint with a condition |
+| `condition <id> [expr]` | | Change a breakpoint condition; omit the expression to clear it |
 | `delete <id>` | `d` | Delete a breakpoint |
 | `breakpoints` | | List breakpoints |
 | `backtrace` | `bt` | Show the call stack |
 | `threads` / `thread <id>` | | List / select threads |
 | `frame [n]`, `up`, `down` | `f` | Select or show a stack frame |
 | `print <expr>` | `p` | Evaluate an expression |
+| `watch <expr>` | | Keep an expression and refresh it at each stop |
+| `watches` | | List watch expressions and their current values/errors |
+| `unwatch <id>` | | Remove a watch expression |
 | `eval <expr>` | `e` | Evaluate in the adapter's REPL context (may have side effects, e.g. debugger console commands) |
 | `set [var] <lvalue> = <value>` | | Assign a value, e.g. `set point.x = 42` |
 | `locals` | | Show local variables |
@@ -184,11 +189,59 @@ saved between sessions. Press Tab for context-aware completion (aliases work too
 - `run`: file paths.
 - `test-run`, `test-debug`, `tests`: names from the most recently listed tests.
   `test-debug` completes `-b` / `--break`.
-- `print`, `eval`, `set`: expression completion from the debug adapter
-  (`completions` request) in the selected frame, falling back to local
+- `print`, `eval`, `set`, `watch`, and breakpoint conditions: expression
+  completion from the debug adapter (`completions` request) in the selected
+  frame, falling back to local
   variable names when the adapter does not support it.
 - `delete`: existing breakpoint IDs; `thread`: thread IDs; `frame`: stack indices.
+- `unwatch`: existing watch IDs.
 - Command names and `help` topics.
+
+Conditional breakpoints use the debug adapter's expression syntax:
+
+```console
+ddbg> break src/main.rs:42 if count > 10
+ddbg> break process_item if item.id == 7
+ddbg> condition 1 count > 20
+ddbg> condition 1
+```
+
+Conditions can be configured before launching. If the adapter does not
+advertise conditional breakpoint support, ddbg rejects them (including at
+launch) rather than silently setting unconditional breakpoints. Repeating
+`break` at an existing location preserves its condition; use `condition` to
+change or clear it. Conditions persist across program restarts within the
+session and appear in the REPL and TUI breakpoint lists. Tab completes
+breakpoint IDs for `condition` and expressions after `if` or the ID.
+For function breakpoints, prefer qualified names (e.g. `hello_rust::add`)
+when a short name could also match other functions. Invalid expressions and
+condition evaluation errors are reported according to the adapter's behavior.
+
+### Watch expressions
+
+```console
+ddbg> watch point.x
+Watch 1: point.x = <unavailable>
+ddbg> run
+# At each stop, after the source listing:
+Watch 1: point.x = 3
+ddbg> watches
+Watch 1: point.x = 3
+ddbg> unwatch 1
+Deleted watch 1
+```
+
+Watches use the adapter's expression syntax and the selected frame. They
+refresh at every stop, frame/thread selection, value assignment, and `eval`.
+Expressions persist across program restarts within the session; current values
+are cleared when execution resumes or ends. An out-of-scope or invalid
+expression shows an error for that watch without hiding the debugger stop.
+`watches` lists cached summaries without evaluating the expressions again.
+Use `print <expression>` to inspect children on demand.
+
+These are **watch expressions, not watchpoints**: they do not interrupt
+execution when memory changes. Avoid expressions with side effects because
+they are evaluated automatically. Watch IDs are separate from breakpoint IDs.
 
 ### Tests
 
@@ -227,6 +280,8 @@ The screen is divided into these areas:
 - **Source pane:** shows breakpoints in the gutter (`●` verified, `○`
   unverified) and marks the execution line with `▶`.
 - **stack**, **locals**, and **breakpoints** panes on the right.
+- A **watches** pane below locals appears when expressions are configured.
+  Use `:watch <expr>`, `:watches`, and `:unwatch <id>` to manage it.
 - **Output pane:** the event and command log.
 - **Bottom line:** key hints, or the `:` command line when it is open.
 
@@ -304,6 +359,16 @@ While a call waits, `pause`, `kill` and `end_session` act immediately. Results
 contain the REPL's text rendering plus structured JSON.
 Logging works as in the CLI (`--log-dap`, `DDBG_LOG`) and never writes to
 stdout.
+
+`set_breakpoint` accepts an optional `condition`; `set_breakpoint_condition`
+changes an existing condition by ID, or clears it when `condition` is omitted.
+Breakpoint results include the condition. The programmatic driver exposes
+`Debugger::break_if(location, expression)` and `Debugger::condition(id, condition)`.
+
+`add_watch` takes an `expression`, `list_watches` returns current summaries,
+and `remove_watch` takes an `id`. Stopped results include watch summaries and
+per-expression errors. The driver exposes `Debugger::watch`, `watches`, and
+`unwatch`, and `StopInfo::watches` contains the values at that stop.
 
 ## Development
 

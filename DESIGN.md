@@ -185,13 +185,11 @@ The first version will not attempt to provide:
 - core dump analysis;
 - advanced exception configuration;
 - data breakpoints;
-- conditional breakpoints;
 - multi-process debugging;
 - remote debugging;
 - SSH orchestration;
 - debugger adapter installation;
 - graphical breakpoint management;
-- persistent watches;
 - inline values;
 - a full-screen TUI;
 - VS Code `launch.json` compatibility;
@@ -1048,6 +1046,7 @@ DAP adapters own the actual debugger breakpoints.
 struct Breakpoint {
     id: BreakpointId,
     requested: Location, // Source(file:line) | Function { name, file }
+    condition: Option<String>, // adapter-native expression
     resolved: Option<SourceLocation>,
     verified: bool,
 }
@@ -1074,6 +1073,13 @@ rather than sending only the newly added breakpoint.
 
 ## Function breakpoints
 
+Source and function breakpoints support `break <location> if <expression>`.
+`condition <id> [expression]` changes or clears a condition. The core owns
+conditions alongside desired locations, preserves them across restarts, and
+sends them in each complete DAP breakpoint set. Unsupported conditions fail
+explicitly, including when configured before adapter initialization; they are
+never silently downgraded to unconditional breakpoints.
+
 ```console
 break parse              # any function named `parse`
 break src/lib.rs:parse   # only `parse` in a file ending with src/lib.rs
@@ -1092,6 +1098,16 @@ whose resolved location is outside its file is annotated with a message.
 ---
 
 # 21. Events
+
+Watch expressions live in a core `WatchStore`, separate from breakpoints.
+`watch <expression>`, `watches`, and `unwatch <id>` manage them in every
+frontend. Expressions survive restarts; current summaries are invalidated on
+resume/termination. The engine evaluates summaries in the selected frame at
+stops and after frame/thread changes, assignments, or REPL evaluation. No
+children are eagerly expanded and no adapter references are retained in watch
+values. Evaluation errors belong to individual watches and never suppress a
+debugger stop. Stop events carry a watch snapshot; other refreshes emit
+`WatchesChanged`. This is expression display, not data breakpoints.
 
 Core application events should be independent of raw DAP events.
 

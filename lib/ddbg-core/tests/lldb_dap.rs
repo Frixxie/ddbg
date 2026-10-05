@@ -192,3 +192,162 @@ async fn function_breakpoint_scoped_to_file() {
     let ev = run_with_function_breakpoint(Some("other.rs")).await;
     assert!(matches!(ev, DebugEvent::SessionTerminated), "{ev:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires lldb-dap"]
+async fn conditional_source_and_function_breakpoints() {
+    let program = build_fixture();
+    let dir = fixture().canonicalize().unwrap();
+    for (location, expression) in [
+        (
+            Location::Source(SourceLocation::new("src/main.rs", 14)),
+            "point.x",
+        ),
+        (
+            Location::Function(FunctionLocation::new("hello_rust::add", None)),
+            "a",
+        ),
+    ] {
+        for (value, should_stop) in [(3, true), (99, false)] {
+            let mut target = LaunchTarget::new(&program, vec![]);
+            target.cwd = dir.clone();
+            let e = engine::spawn(EngineConfig {
+                adapter: Arc::new(LldbDapAdapter::for_rust()),
+                cwd: dir.clone(),
+                target: Some(target),
+            });
+            let mut rx = e.subscribe();
+            e.execute(Command::ConditionalBreak {
+                location: location.clone(),
+                condition: format!("{expression} == {value}"),
+            })
+            .await
+            .unwrap();
+            e.execute(Command::Run(None)).await.unwrap();
+            let ev = wait_for(&mut rx, |e| {
+                matches!(
+                    e,
+                    DebugEvent::SessionStopped(_) | DebugEvent::SessionTerminated
+                )
+            })
+            .await;
+            if should_stop {
+                let DebugEvent::SessionStopped(info) = ev else {
+                    panic!("expected conditional stop: {ev:?}")
+                };
+                assert_eq!(info.reason, StopReason::Breakpoint(vec![BreakpointId(1)]));
+                let frame = info.frame.unwrap();
+                assert!(frame.name.contains("hello_rust::"), "{frame:?}");
+            } else {
+                assert!(
+                    matches!(ev, DebugEvent::SessionTerminated),
+                    "false condition stopped: {ev:?}"
+                );
+            }
+            e.execute(Command::Quit).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires lldb-dap"]
+async fn watch_expressions_follow_frames_assignments_and_restarts() {
+    let program = build_fixture();
+    let dir = fixture().canonicalize().unwrap();
+    let mut target = LaunchTarget::new(&program, vec![]);
+    target.cwd = dir.clone();
+    let e = engine::spawn(EngineConfig {
+        adapter: Arc::new(LldbDapAdapter::for_rust()),
+        cwd: dir,
+        target: Some(target),
+    });
+    let mut rx = e.subscribe();
+    e.execute(Command::Break(Location::Source(SourceLocation::new(
+        "src/main.rs",
+        14,
+    ))))
+    .await
+    .unwrap();
+    e.execute(Command::Watch("point.x".into())).await.unwrap();
+    e.execute(Command::Watch("missing_variable".into()))
+        .await
+        .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(
+        info.watches[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value,
+        "3"
+    );
+    assert!(info.watches[1].result.as_ref().unwrap().is_err());
+
+    e.execute(Command::Step).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert!(info.frame.unwrap().name.contains("add"));
+    assert!(info.watches[0].result.as_ref().unwrap().is_err());
+    e.execute(Command::Frame(ddbg_core::command::FrameSelector::Up))
+        .await
+        .unwrap();
+    let Reply::Watches(watches) = e.execute(Command::Watches).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        watches[0].result.as_ref().unwrap().as_ref().unwrap().value,
+        "3"
+    );
+    e.execute(Command::Frame(ddbg_core::command::FrameSelector::Down))
+        .await
+        .unwrap();
+    e.execute(Command::Finish).await.unwrap();
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await;
+    e.execute(Command::Set {
+        target: "point.x".into(),
+        value: "9".into(),
+    })
+    .await
+    .unwrap();
+    let Reply::Watches(watches) = e.execute(Command::Watches).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        watches[0].result.as_ref().unwrap().as_ref().unwrap().value,
+        "9"
+    );
+
+    e.execute(Command::Continue).await.unwrap();
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionTerminated)).await;
+    let Reply::Watches(watches) = e.execute(Command::Watches).await.unwrap() else {
+        panic!()
+    };
+    assert!(watches.iter().all(|w| w.result.is_none()));
+    e.execute(Command::Run(None)).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(
+        info.watches[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value,
+        "3"
+    );
+    e.execute(Command::Quit).await.unwrap();
+}

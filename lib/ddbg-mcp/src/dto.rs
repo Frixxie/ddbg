@@ -9,6 +9,7 @@ use ddbg_core::frame::StackFrame;
 use ddbg_core::session::StopReason;
 use ddbg_core::thread::Thread;
 use ddbg_core::variable::{Evaluation, Variable};
+use ddbg_core::watch::Watch;
 use ddbg_driver::{Halt, TestCase};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -55,6 +56,8 @@ pub struct StopDto {
     pub frame: Option<FrameDto>,
     pub exception: Option<ExceptionDto>,
     pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub watches: Vec<WatchDto>,
 }
 
 impl From<StopInfo> for StopDto {
@@ -75,6 +78,7 @@ impl From<StopInfo> for StopDto {
             frame: s.frame.map(|f| FrameDto::new(None, f)),
             exception: s.exception.map(Into::into),
             elapsed_ms: s.elapsed.map(|d| d.as_millis() as u64),
+            watches: s.watches.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -131,6 +135,7 @@ pub struct BreakpointDto {
     pub id: u32,
     /// The location as requested, e.g. `src/main.rs:14` or `my_fn`.
     pub requested: String,
+    pub condition: Option<String>,
     pub kind: &'static str,
     /// Where the adapter bound the breakpoint, if known.
     pub resolved: Option<String>,
@@ -147,6 +152,7 @@ impl From<Breakpoint> for BreakpointDto {
                 Location::Function(_) => "function",
             },
             requested: b.requested.to_string(),
+            condition: b.condition,
             resolved: b.resolved.map(|r| r.to_string()),
             verified: b.verified,
             message: b.message.or_else(|| {
@@ -154,6 +160,35 @@ impl From<Breakpoint> for BreakpointDto {
                     "pending: binds when the code is loaded, or the location has no code".into()
                 })
             }),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WatchDto {
+    pub id: u32,
+    pub expression: String,
+    /// Unavailable until evaluated or while the program is not stopped.
+    pub value: Option<String>,
+    pub type_name: Option<String>,
+    pub has_children: bool,
+    pub error: Option<String>,
+}
+
+impl From<Watch> for WatchDto {
+    fn from(w: Watch) -> Self {
+        let (value, type_name, has_children, error) = match w.result {
+            Some(Ok(v)) => (Some(v.value), v.type_name, v.has_children, None),
+            Some(Err(e)) => (None, None, false, Some(e)),
+            None => (None, None, false, None),
+        };
+        Self {
+            id: w.id.0,
+            expression: w.expression,
+            value,
+            type_name,
+            has_children,
+            error,
         }
     }
 }
@@ -277,6 +312,7 @@ mod tests {
             frame: Some(frame()),
             exception: None,
             elapsed: None,
+            watches: Vec::new(),
         });
         let v = serde_json::to_value(HaltDto::from(halt)).unwrap();
         assert_eq!(v["state"], "stopped");
@@ -297,6 +333,7 @@ mod tests {
         let bp = Breakpoint {
             id: BreakpointId(2),
             requested: Location::Source(SourceLocation::new("src/main.rs", 14)),
+            condition: Some("point.x == 3".into()),
             resolved: None,
             verified: false,
             message: None,
@@ -305,6 +342,7 @@ mod tests {
         let v = serde_json::to_value(BreakpointDto::from(bp)).unwrap();
         assert_eq!(v["requested"], "src/main.rs:14");
         assert_eq!(v["kind"], "source");
+        assert_eq!(v["condition"], "point.x == 3");
         assert!(v["message"].as_str().unwrap().starts_with("pending"));
     }
 }

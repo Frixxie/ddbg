@@ -11,6 +11,7 @@ pub mod session;
 pub mod target;
 pub mod thread;
 pub mod variable;
+pub mod watch;
 
 pub use command::{Command, Reply};
 pub use engine::{EngineConfig, EngineHandle};

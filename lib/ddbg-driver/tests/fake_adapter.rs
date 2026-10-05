@@ -31,7 +31,9 @@ async fn fake(mut io: DuplexStream) {
         };
         let args = req.arguments.clone().unwrap_or(Value::Null);
         let body = match req.command.as_str() {
-            "initialize" => json!({"supportsConfigurationDoneRequest": true}),
+            "initialize" => {
+                json!({"supportsConfigurationDoneRequest": true, "supportsConditionalBreakpoints": true})
+            }
             "setBreakpoints" => {
                 let line = args["breakpoints"][0]["line"].clone();
                 json!({"breakpoints": [{"id": 1, "verified": true, "line": line}]})
@@ -134,4 +136,70 @@ async fn text_session() {
     assert!(out.contains("Process exited normally."), "{out}");
     assert!(dbg.exec("next").await.is_err());
     assert!(dbg.exec("nonsense").await.is_err());
+}
+
+#[tokio::test]
+async fn conditional_breakpoints_via_typed_and_text_commands() {
+    use ddbg_core::breakpoint::{Location, SourceLocation};
+    let mut dbg = debugger();
+    let bp = dbg
+        .break_if(
+            Location::Source(SourceLocation::new("/src/main.rs", 5)),
+            "x == 42",
+        )
+        .await
+        .unwrap();
+    assert_eq!(bp.condition.as_deref(), Some("x == 42"));
+    dbg.run().await.unwrap().into_stopped().unwrap();
+    assert!(
+        dbg.exec("condition 1 x > 2")
+            .await
+            .unwrap()
+            .contains("if x > 2")
+    );
+    assert_eq!(
+        dbg.breakpoints().await.unwrap()[0].condition.as_deref(),
+        Some("x > 2")
+    );
+    let cleared = dbg.condition(bp.id, None).await.unwrap();
+    assert_eq!(cleared.condition, None);
+    assert!(dbg.exec("break /src/main.rs:5 if x > 3").await.is_err());
+    dbg.quit().await.unwrap();
+}
+
+#[tokio::test]
+async fn watch_expressions_via_typed_and_text_commands() {
+    let mut dbg = debugger();
+    let w = dbg.watch("x + 1").await.unwrap();
+    assert_eq!(w.result, None);
+    dbg.break_at("/src/main.rs", 5).await.unwrap();
+    let stop = dbg.run().await.unwrap().into_stopped().unwrap();
+    assert_eq!(
+        stop.watches[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value,
+        "7"
+    );
+    assert!(dbg.take_transcript().contains("Watch 1: x + 1 = 7"));
+    assert!(
+        dbg.exec("watch x + 1")
+            .await
+            .unwrap()
+            .contains("already set")
+    );
+    assert_eq!(dbg.watches().await.unwrap().len(), 1);
+    let out = dbg.exec("next").await.unwrap();
+    assert!(out.contains("Watch 1: x + 1 = 7"), "{out}");
+    dbg.cont().await.unwrap();
+    assert!(dbg.watches().await.unwrap()[0].result.is_none());
+    dbg.unwatch(w.id).await.unwrap();
+    assert_eq!(
+        dbg.exec("watches").await.unwrap().lines().next(),
+        Some("No watches.")
+    );
+    dbg.quit().await.unwrap();
 }

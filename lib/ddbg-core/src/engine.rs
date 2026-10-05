@@ -25,12 +25,16 @@ use crate::breakpoint::{Breakpoint, BreakpointId};
 use crate::command::{Command, Completion, FrameSelector, Location, Reply, ScopeVariables};
 use anyhow::{Result, anyhow, bail};
 
-use crate::error::{NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING, NOT_STOPPED};
+use crate::error::{
+    NO_CONDITIONAL_BREAKPOINTS, NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING,
+    NOT_STOPPED,
+};
 use crate::event::{DebugEvent, ExceptionInfo, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
 use crate::target::{DebugTarget, LaunchTarget};
 use crate::thread::{Thread, ThreadId};
 use crate::variable::{Evaluation, VarRef, Variable};
+use crate::watch::{WatchId, WatchValue};
 
 const MAX_CHILDREN: usize = 100;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -242,22 +246,12 @@ impl Engine {
                 self.mark_resumed(false);
                 Ok(Reply::Ok)
             }
-            Command::Break(loc) => {
-                let is_function = matches!(loc, Location::Function(_));
-                if is_function
-                    && self.conn.is_some()
-                    && !self.session.supports(Feature::FunctionBreakpoints)
-                {
-                    bail!(NO_FUNCTION_BREAKPOINTS);
-                }
-                let (id, new) = self.session.breakpoints.add(loc, &self.cwd);
-                if new && self.can_set_breakpoints() {
-                    let bp = self.session.breakpoints.get(id).unwrap().clone();
-                    self.sync_for(&bp).await?;
-                }
-                let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
-                Ok(Reply::BreakpointSet { breakpoint, new })
-            }
+            Command::Break(loc) => self.cmd_break(loc, None).await,
+            Command::ConditionalBreak {
+                location,
+                condition,
+            } => self.cmd_break(location, Some(condition)).await,
+            Command::Condition { id, condition } => self.cmd_condition(id, condition).await,
             Command::DeleteBreakpoint(id) => {
                 let bp = self
                     .session
@@ -303,6 +297,7 @@ impl Engine {
                 self.session.selected_thread = Some(tid);
                 self.load_stack(tid).await?;
                 self.emit(DebugEvent::FrameChanged);
+                self.refresh_watches().await;
                 self.frame_reply(0)
             }
             Command::Frame(sel) => {
@@ -325,10 +320,33 @@ impl Engine {
                 if index != current || self.session.selected_frame.is_none() {
                     self.select_frame(index).await?;
                     self.emit(DebugEvent::FrameChanged);
+                    self.refresh_watches().await;
                 }
                 self.frame_reply(index)
             }
             Command::Print(expr) => self.cmd_print(expr, "watch").await,
+            Command::Watch(expression) => {
+                let expression = expression.trim().to_owned();
+                if expression.is_empty() {
+                    bail!("watch expression must not be empty");
+                }
+                let (id, new) = self.session.watches.add(expression);
+                if new && self.session.status.is_stopped() {
+                    self.evaluate_watch(id).await;
+                }
+                Ok(Reply::WatchSet {
+                    watch: self.session.watches.get(id).unwrap().clone(),
+                    new,
+                })
+            }
+            Command::Unwatch(id) => {
+                self.session
+                    .watches
+                    .remove(id)
+                    .ok_or_else(|| anyhow!("no watch {id}"))?;
+                Ok(Reply::WatchDeleted(id))
+            }
+            Command::Watches => Ok(Reply::Watches(self.session.watches.snapshot())),
             Command::Eval(expr) => self.cmd_print(expr, "repl").await,
             Command::Set { target, value } => self.cmd_set(target, value).await,
             Command::SetVariable { scope, name, value } => {
@@ -367,6 +385,79 @@ impl Engine {
             )
     }
 
+    fn check_condition(&self, condition: Option<&str>) -> Result<()> {
+        if let Some(condition) = condition {
+            if condition.trim().is_empty() {
+                bail!("breakpoint condition must not be empty; omit it to clear the condition");
+            }
+            if self.conn.is_some() && !self.session.supports(Feature::ConditionalBreakpoints) {
+                bail!(NO_CONDITIONAL_BREAKPOINTS);
+            }
+        }
+        Ok(())
+    }
+
+    async fn cmd_break(&mut self, location: Location, condition: Option<String>) -> Result<Reply> {
+        self.check_condition(condition.as_deref())?;
+        if matches!(location, Location::Function(_))
+            && self.conn.is_some()
+            && !self.session.supports(Feature::FunctionBreakpoints)
+        {
+            bail!(NO_FUNCTION_BREAKPOINTS);
+        }
+        let before = self.session.breakpoints.clone();
+        let (id, new) = self.session.breakpoints.add(location, &self.cwd);
+        if !new && let Some(condition) = &condition {
+            let bp = self.session.breakpoints.get(id).unwrap();
+            if bp.condition.as_ref() != Some(condition) {
+                bail!(
+                    "breakpoint {id} already exists; use `condition {id} <expression>` to change it"
+                );
+            }
+        }
+        if new {
+            self.session.breakpoints.set_condition(id, condition);
+            if self.can_set_breakpoints() {
+                let bp = self.session.breakpoints.get(id).unwrap().clone();
+                if let Err(e) = self.sync_for(&bp).await {
+                    self.session.breakpoints = before;
+                    return Err(e);
+                }
+            }
+        }
+        let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
+        Ok(Reply::BreakpointSet { breakpoint, new })
+    }
+
+    async fn cmd_condition(
+        &mut self,
+        id: BreakpointId,
+        condition: Option<String>,
+    ) -> Result<Reply> {
+        let bp = self
+            .session
+            .breakpoints
+            .get(id)
+            .ok_or_else(|| anyhow!("no breakpoint {id}"))?
+            .clone();
+        self.check_condition(condition.as_deref())?;
+        if bp.condition != condition {
+            let before = self.session.breakpoints.clone();
+            self.session.breakpoints.set_condition(id, condition);
+            if self.can_set_breakpoints()
+                && let Err(e) = self.sync_for(&bp).await
+            {
+                self.session.breakpoints = before;
+                return Err(e);
+            }
+        }
+        let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
+        Ok(Reply::BreakpointSet {
+            breakpoint,
+            new: false,
+        })
+    }
+
     fn frame_reply(&self, index: usize) -> Result<Reply> {
         let frame = self
             .session
@@ -382,6 +473,10 @@ impl Engine {
         self.session.on_resume();
         let was_stopped = self.session.status.is_stopped();
         self.session.status = SessionStatus::Running;
+        let watches = self.session.watches.snapshot();
+        if !watches.is_empty() {
+            self.emit(DebugEvent::WatchesChanged(watches));
+        }
         if announce && was_stopped {
             self.emit(DebugEvent::SessionContinued);
         }
@@ -428,6 +523,18 @@ impl Engine {
             .request(InitializeArguments::new(self.adapter.id()))
             .await?;
         self.session.capabilities = caps;
+
+        // Conditions can be configured before capabilities are known. Refuse
+        // the launch rather than silently installing unconditional breakpoints.
+        if self
+            .session
+            .breakpoints
+            .iter()
+            .any(|bp| bp.condition.is_some())
+            && !self.session.supports(Feature::ConditionalBreakpoints)
+        {
+            bail!(NO_CONDITIONAL_BREAKPOINTS);
+        }
 
         let mut launch = client.send(LaunchArguments(launch_args))?;
         let mut launched = false;
@@ -537,7 +644,7 @@ impl Engine {
         if context == "repl" {
             // REPL evaluation may have side effects, so it is not repeated
             // to describe the value.
-            self.invalidate_variables();
+            self.invalidate_variables().await;
             return self.value_reply(eval).await;
         }
         self.eval_reply(&expression, eval).await
@@ -652,9 +759,10 @@ impl Engine {
         }
     }
 
-    fn invalidate_variables(&mut self) {
+    async fn invalidate_variables(&mut self) {
         self.session.variable_cache.clear();
         self.emit(DebugEvent::VariablesChanged);
+        self.refresh_watches().await;
     }
 
     /// Assign to an l-value: `setExpression` when supported, otherwise
@@ -684,7 +792,7 @@ impl Engine {
                 frame_id,
             })
             .await?;
-        self.invalidate_variables();
+        self.invalidate_variables().await;
         Ok(Evaluation {
             value: resp.value,
             type_name: resp.type_.filter(|t| !t.is_empty()),
@@ -760,7 +868,7 @@ impl Engine {
                 value,
             })
             .await?;
-        self.invalidate_variables();
+        self.invalidate_variables().await;
         Ok(Evaluation {
             value: resp.value,
             type_name: resp.type_.filter(|t| !t.is_empty()),
@@ -872,6 +980,46 @@ impl Engine {
     // -----------------------------------------------------------------------
     // State refresh
     // -----------------------------------------------------------------------
+
+    /// Evaluate only the summary, without expanding children or invoking
+    /// ToString(). Each failure belongs to its watch, not to the debugger stop.
+    async fn evaluate_watch(&mut self, id: WatchId) {
+        let expression = self.session.watches.get(id).unwrap().expression.clone();
+        let result = match self.session.current_frame().map(|f| f.id.0) {
+            Some(frame_id) => match self.client() {
+                Ok(client) => client
+                    .request(EvaluateArguments {
+                        expression: expression.clone(),
+                        frame_id: Some(frame_id),
+                        context: Some("watch".into()),
+                    })
+                    .await
+                    .map(|r| WatchValue::from(Evaluation::from(r)))
+                    .map_err(|e| evaluate_error(&expression, e).to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+            None => Err("no frame selected".into()),
+        };
+        self.session.watches.set_result(id, result);
+    }
+
+    async fn evaluate_watches(&mut self) {
+        if !self.session.status.is_stopped() {
+            self.session.watches.invalidate();
+            return;
+        }
+        for w in self.session.watches.snapshot() {
+            self.evaluate_watch(w.id).await;
+        }
+    }
+
+    async fn refresh_watches(&mut self) {
+        self.evaluate_watches().await;
+        let watches = self.session.watches.snapshot();
+        if !watches.is_empty() {
+            self.emit(DebugEvent::WatchesChanged(watches));
+        }
+    }
 
     async fn refresh_threads(&mut self) -> Result<()> {
         let resp = self.client()?.request(ThreadsArguments {}).await?;
@@ -1071,6 +1219,7 @@ impl Engine {
             _ => None,
         };
 
+        self.evaluate_watches().await;
         self.emit(DebugEvent::SessionStopped(Box::new(StopInfo {
             reason,
             thread: tid,
@@ -1078,6 +1227,7 @@ impl Engine {
             frame: self.session.stack.first().cloned(),
             exception,
             elapsed,
+            watches: self.session.watches.snapshot(),
         })));
         Ok(())
     }

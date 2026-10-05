@@ -26,6 +26,7 @@ struct Fake {
     log: Log,
     bp_id: i64,
     caps: Value,
+    watch_value: String,
     args: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
@@ -57,6 +58,19 @@ impl Fake {
         self.send(msg).await;
     }
 
+    async fn reject(&mut self, req: &Request, message: &str) {
+        self.seq += 1;
+        self.send(Message::Response(Response {
+            seq: self.seq,
+            request_seq: req.seq,
+            success: false,
+            command: req.command.clone(),
+            message: Some(message.into()),
+            body: None,
+        }))
+        .await;
+    }
+
     async fn run(mut self) {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -76,6 +90,19 @@ impl Fake {
                 .unwrap()
                 .push((req.command.clone(), args.clone()));
             match req.command.as_str() {
+                "setBreakpoints" | "setFunctionBreakpoints"
+                    if args["breakpoints"].as_array().unwrap().iter().any(|b| b["condition"] == "reject") =>
+                {
+                    self.seq += 1;
+                    self.send(Message::Response(Response {
+                        seq: self.seq,
+                        request_seq: req.seq,
+                        success: false,
+                        command: req.command.clone(),
+                        message: Some("invalid condition".into()),
+                        body: None,
+                    })).await;
+                }
                 "initialize" => {
                     let mut caps = json!({"supportsConfigurationDoneRequest": true, "supportTerminateDebuggee": true, "supportsFunctionBreakpoints": true, "supportsExceptionInfoRequest": true});
                     if let Value::Object(extra) = &self.caps {
@@ -84,10 +111,12 @@ impl Fake {
                     self.respond(&req, caps).await
                 }
                 "setExpression" => {
+                    self.watch_value = args["value"].as_str().unwrap().to_owned();
                     self.respond(&req, json!({"value": args["value"], "type": "i32"}))
                         .await
                 }
                 "setVariable" => {
+                    self.watch_value = args["value"].as_str().unwrap().to_owned();
                     self.respond(
                         &req,
                         json!({"value": args["value"], "type": "i32", "variablesReference": 0}),
@@ -170,11 +199,18 @@ impl Fake {
                     .await
                 }
                 "evaluate" => {
-                    self.respond(
-                        &req,
-                        json!({"result": "Point", "type": "Point", "variablesReference": 300}),
-                    )
-                    .await
+                    if args["expression"] == "missing"
+                        || (args["expression"] == "frame_local" && args["frameId"] != 10)
+                    {
+                        self.reject(&req, "expression is out of scope").await;
+                    } else if args["expression"] == "watch_value" {
+                        self.respond(&req, json!({"result": self.watch_value, "type": "i32", "variablesReference": 0})).await;
+                    } else {
+                        self.respond(
+                            &req,
+                            json!({"result": "Point", "type": "Point", "variablesReference": 300}),
+                        ).await;
+                    }
                 }
                 "next" => {
                     self.respond(&req, json!({})).await;
@@ -253,6 +289,7 @@ fn engine_with(caps: Value) -> (EngineHandle, Log, Args) {
                     log: log2.clone(),
                     bp_id: 0,
                     caps: caps.clone(),
+                    watch_value: "42".into(),
                     args: args2.clone(),
                 }
                 .run(),
@@ -324,6 +361,356 @@ fn last_args(args: &Args, command: &str) -> Value {
         .find(|(c, _)| c == command)
         .map(|(_, a)| a.clone())
         .unwrap_or_else(|| panic!("no {command} request"))
+}
+
+fn conditional(location: Location, condition: &str) -> Command {
+    Command::ConditionalBreak {
+        location,
+        condition: condition.into(),
+    }
+}
+
+fn source(line: u32) -> Location {
+    Location::Source(SourceLocation::new("/src/main.rs", line))
+}
+
+async fn breakpoints(e: &EngineHandle) -> Vec<ddbg_core::breakpoint::Breakpoint> {
+    let Reply::Breakpoints(bps) = e.execute(Command::Breakpoints).await.unwrap() else {
+        panic!()
+    };
+    bps
+}
+
+#[tokio::test]
+async fn conditional_breakpoints_sync_edit_clear_and_survive_restart() {
+    let (e, _, args) = engine_with(json!({"supportsConditionalBreakpoints": true}));
+    let mut rx = e.subscribe();
+    e.execute(conditional(source(5), "x > 2")).await.unwrap();
+    e.execute(Command::Break(source(10))).await.unwrap();
+    e.execute(conditional(
+        Location::Function(FunctionLocation::new("parse", None)),
+        "input != 0",
+    ))
+    .await
+    .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await;
+    let bps = last_args(&args, "setBreakpoints")["breakpoints"].clone();
+    assert_eq!(bps.as_array().unwrap().len(), 2);
+    assert_eq!(bps[0]["condition"], "x > 2");
+    assert!(bps[1].get("condition").is_none());
+    assert_eq!(
+        last_args(&args, "setFunctionBreakpoints")["breakpoints"][0]["condition"],
+        "input != 0"
+    );
+
+    e.execute(Command::Condition {
+        id: BreakpointId(1),
+        condition: Some("x == 7".into()),
+    })
+    .await
+    .unwrap();
+    let bps = last_args(&args, "setBreakpoints")["breakpoints"].clone();
+    assert_eq!(bps.as_array().unwrap().len(), 2);
+    assert_eq!(bps[0]["condition"], "x == 7");
+    e.execute(Command::Condition {
+        id: BreakpointId(3),
+        condition: None,
+    })
+    .await
+    .unwrap();
+    assert!(
+        last_args(&args, "setFunctionBreakpoints")["breakpoints"][0]
+            .get("condition")
+            .is_none()
+    );
+
+    e.execute(Command::Run(None)).await.unwrap();
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await;
+    assert_eq!(
+        last_args(&args, "setBreakpoints")["breakpoints"][0]["condition"],
+        "x == 7"
+    );
+    e.execute(Command::Condition {
+        id: BreakpointId(1),
+        condition: None,
+    })
+    .await
+    .unwrap();
+    assert!(
+        last_args(&args, "setBreakpoints")["breakpoints"][0]
+            .get("condition")
+            .is_none()
+    );
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_conditions_refuse_launch_without_installing_breakpoints() {
+    let (e, log) = engine();
+    e.execute(conditional(source(5), "x > 2")).await.unwrap();
+    let err = e.execute(Command::Run(None)).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not support conditional breakpoints"),
+        "{err}"
+    );
+    assert_eq!(requests(&log, "launch"), 0);
+    assert_eq!(requests(&log, "setBreakpoints"), 0);
+    assert_eq!(breakpoints(&e).await[0].condition.as_deref(), Some("x > 2"));
+    e.execute(Command::Condition {
+        id: BreakpointId(1),
+        condition: None,
+    })
+    .await
+    .unwrap();
+    e.execute(Command::Run(None)).await.unwrap();
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_condition_edits_do_not_modify_active_breakpoints() {
+    let (e, log, _, _) = start_stopped_with(json!({})).await;
+    let before = breakpoints(&e).await;
+    for cmd in [
+        conditional(source(10), "x > 2"),
+        Command::Condition {
+            id: BreakpointId(1),
+            condition: Some("x > 2".into()),
+        },
+    ] {
+        assert!(
+            e.execute(cmd)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("does not support conditional breakpoints")
+        );
+        assert_eq!(breakpoints(&e).await, before);
+    }
+    assert_eq!(requests(&log, "setBreakpoints"), 1);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn conditional_breakpoint_duplicates_require_explicit_edits() {
+    let (e, _) = engine();
+    let cmd = conditional(source(5), "x > 2");
+    e.execute(cmd.clone()).await.unwrap();
+    assert!(matches!(
+        e.execute(cmd).await.unwrap(),
+        Reply::BreakpointSet { new: false, .. }
+    ));
+    // A plain break never clears an existing condition.
+    e.execute(Command::Break(source(5))).await.unwrap();
+    assert!(
+        e.execute(conditional(source(5), "x > 3"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("use `condition 1")
+    );
+    assert_eq!(breakpoints(&e).await.len(), 1);
+    assert_eq!(breakpoints(&e).await[0].condition.as_deref(), Some("x > 2"));
+    assert!(e.execute(conditional(source(10), "  ")).await.is_err());
+    assert!(
+        e.execute(Command::Condition {
+            id: BreakpointId(9),
+            condition: None
+        })
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("no breakpoint 9")
+    );
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_condition_sync_restores_desired_breakpoints() {
+    let (e, _, _, _) = start_stopped_with(json!({"supportsConditionalBreakpoints": true})).await;
+    let before = breakpoints(&e).await;
+    for cmd in [
+        conditional(source(10), "reject"),
+        conditional(
+            Location::Function(FunctionLocation::new("parse", None)),
+            "reject",
+        ),
+        Command::Condition {
+            id: BreakpointId(1),
+            condition: Some("reject".into()),
+        },
+    ] {
+        assert!(
+            e.execute(cmd)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("invalid condition")
+        );
+        assert_eq!(breakpoints(&e).await, before);
+    }
+    e.execute(Command::Quit).await.unwrap();
+}
+
+async fn watches(e: &EngineHandle) -> Vec<ddbg_core::watch::Watch> {
+    let Reply::Watches(watches) = e.execute(Command::Watches).await.unwrap() else {
+        panic!()
+    };
+    watches
+}
+
+#[tokio::test]
+async fn watches_refresh_at_stops_without_expanding_and_errors_do_not_hide_stops() {
+    let (e, log, args) = engine_with(json!({}));
+    let mut rx = e.subscribe();
+    assert!(e.execute(Command::Watch("  ".into())).await.is_err());
+    e.execute(Command::Watch(" point ".into())).await.unwrap();
+    e.execute(Command::Watch("missing".into())).await.unwrap();
+    assert!(matches!(
+        e.execute(Command::Watch("point".into())).await.unwrap(),
+        Reply::WatchSet { new: false, .. }
+    ));
+    assert_eq!(watches(&e).await.len(), 2);
+    assert!(watches(&e).await.iter().all(|w| w.result.is_none()));
+    assert_eq!(requests(&log, "evaluate"), 0);
+    e.execute(Command::Run(None)).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(info.watches.len(), 2);
+    let value = info.watches[0].result.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(value.value, "Point");
+    assert!(value.has_children);
+    assert!(
+        info.watches[1]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .contains("out of scope")
+    );
+    assert_eq!(requests(&log, "evaluate"), 2);
+    assert_eq!(requests(&log, "variables"), 0);
+    assert_eq!(last_args(&args, "evaluate")["context"], "watch");
+    assert_eq!(last_args(&args, "evaluate")["frameId"], 10);
+    assert_eq!(watches(&e).await, info.watches);
+    assert_eq!(requests(&log, "evaluate"), 2); // listing never invokes expressions
+    e.execute(Command::Next).await.unwrap();
+    let DebugEvent::WatchesChanged(cleared) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::WatchesChanged(_))).await
+    else {
+        panic!()
+    };
+    assert!(cleared.iter().all(|w| w.result.is_none()));
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert!(info.watches[0].result.as_ref().unwrap().is_ok());
+    assert_eq!(requests(&log, "evaluate"), 4);
+    e.execute(Command::Continue).await.unwrap();
+    wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionTerminated)).await;
+    assert!(watches(&e).await.iter().all(|w| w.result.is_none()));
+    e.execute(Command::Run(None)).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |e| matches!(e, DebugEvent::SessionStopped(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(info.watches.len(), 2);
+    assert_eq!(info.watches[0].expression, "point");
+    assert!(info.watches[0].result.as_ref().unwrap().is_ok());
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn watches_added_while_stopped_refresh_on_frame_thread_and_value_changes() {
+    let (e, _, _, args) = start_stopped_with(json!({"supportsSetExpression": true})).await;
+    let Reply::WatchSet { watch, new } = e
+        .execute(Command::Watch("frame_local".into()))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(new);
+    assert!(watch.result.unwrap().is_ok());
+    e.execute(Command::Frame(FrameSelector::Index(1)))
+        .await
+        .unwrap();
+    assert_eq!(last_args(&args, "evaluate")["frameId"], 11);
+    assert!(watches(&e).await[0].result.as_ref().unwrap().is_err());
+    e.execute(Command::Thread(ddbg_core::thread::ThreadId(1)))
+        .await
+        .unwrap();
+    assert_eq!(last_args(&args, "evaluate")["frameId"], 10);
+    assert!(watches(&e).await[0].result.as_ref().unwrap().is_ok());
+    e.execute(Command::Watch("watch_value".into()))
+        .await
+        .unwrap();
+    e.execute(Command::Set {
+        target: "x".into(),
+        value: "77".into(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        watches(&e).await[1]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value,
+        "77"
+    );
+    e.execute(Command::Unwatch(ddbg_core::watch::WatchId(1)))
+        .await
+        .unwrap();
+    assert_eq!(watches(&e).await.len(), 1);
+    assert!(
+        e.execute(Command::Unwatch(ddbg_core::watch::WatchId(1)))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no watch 1")
+    );
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn watches_refresh_after_set_variable_and_repl_evaluation() {
+    let (e, log, _, _) = start_stopped_with(json!({"supportsSetVariable": true})).await;
+    e.execute(Command::Watch("watch_value".into()))
+        .await
+        .unwrap();
+    e.execute(Command::Set {
+        target: "x".into(),
+        value: "12".into(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        watches(&e).await[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .value,
+        "12"
+    );
+    let before = requests(&log, "evaluate");
+    e.execute(Command::Eval("debugger command".into()))
+        .await
+        .unwrap();
+    assert!(requests(&log, "evaluate") > before + 1); // REPL evaluation plus watch refresh
+    e.execute(Command::Quit).await.unwrap();
 }
 
 fn set(target: &str, value: &str) -> Command {

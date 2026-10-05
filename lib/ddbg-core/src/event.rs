@@ -6,6 +6,7 @@ use crate::breakpoint::Breakpoint;
 use crate::frame::StackFrame;
 use crate::session::StopReason;
 use crate::thread::ThreadId;
+use crate::watch::Watch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugEvent {
@@ -20,6 +21,8 @@ pub enum DebugEvent {
     FrameChanged,
     /// A value was assigned; cached variables are stale.
     VariablesChanged,
+    /// Watch values refreshed after a frame/thread change or assignment.
+    WatchesChanged(Vec<Watch>),
 
     Output(Output),
 }
@@ -35,6 +38,8 @@ pub struct StopInfo {
     pub exception: Option<ExceptionInfo>,
     /// Wall-clock time the debuggee ran since it last resumed.
     pub elapsed: Option<std::time::Duration>,
+    /// Watch summaries in the selected (initially top) frame at this stop.
+    pub watches: Vec<Watch>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

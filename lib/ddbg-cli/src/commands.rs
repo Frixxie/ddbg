@@ -95,10 +95,11 @@ impl DdbgCompleter {
                     candidates.push(candidate(name.clone(), "Test".into(), span));
                 }
             }
-            "delete" | "thread" | "frame" => {
+            "delete" | "condition" | "thread" | "frame" | "unwatch" => {
                 let query = match command {
-                    "delete" => Command::Breakpoints,
+                    "delete" | "condition" => Command::Breakpoints,
                     "thread" => Command::Threads,
+                    "unwatch" => Command::Watches,
                     _ => Command::Backtrace,
                 };
                 if let Ok(Ok(reply)) = self.runtime.block_on(async {
@@ -126,8 +127,14 @@ pub fn expression_query(line: &str, pos: usize) -> Option<(usize, Command)> {
     let trimmed = before.trim_start();
     let (word, rest) = trimmed.split_once(char::is_whitespace)?;
     let rest = match lookup(word)?.name {
-        "print" | "eval" => rest.trim_start(),
+        "print" | "eval" | "watch" => rest.trim_start(),
         "set" => crate::parser::set_body(rest.trim_start()),
+        "break" => crate::parser::split_break_condition(rest.trim_start()).1?,
+        "condition" => rest
+            .trim_start()
+            .split_once(char::is_whitespace)?
+            .1
+            .trim_start(),
         _ => return None,
     };
     let offset = pos - rest.len();
@@ -181,6 +188,10 @@ fn candidate(value: String, description: String, span: Span) -> Suggestion {
 
 fn reply_candidates(reply: Reply, span: Span) -> Vec<Suggestion> {
     match reply {
+        Reply::Watches(watches) => watches
+            .into_iter()
+            .map(|w| candidate(w.id.to_string(), w.expression, span))
+            .collect(),
         Reply::Breakpoints(bps) => bps
             .into_iter()
             .map(|b| candidate(b.id.to_string(), b.requested.to_string(), span))
@@ -358,11 +369,17 @@ mod tests {
             ))))
             .await
             .unwrap();
+        c.engine
+            .execute(Command::Watch("x + 1".into()))
+            .await
+            .unwrap();
         let mut c = tokio::task::spawn_blocking(move || {
             let mut c = c;
             let found = c.suggestions("d ", 2);
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].value, "1");
+            assert_eq!(c.suggestions("condition ", 10)[0].value, "1");
+            assert_eq!(c.suggestions("unwatch ", 8)[0].value, "1");
             assert!(
                 found[0]
                     .description
@@ -403,6 +420,24 @@ mod tests {
         assert_eq!((off, text.as_str(), column), (8, "p.x = y", 7));
         assert!(q("b foo").is_none());
         assert!(q("print").is_none());
+        assert_eq!(
+            q("watch po"),
+            Some((
+                6,
+                Command::Complete {
+                    text: "po".into(),
+                    column: 2
+                }
+            ))
+        );
+        for line in ["b foo if po", "condition 1 po", "b foo if po "] {
+            let Some((offset, Command::Complete { text, column })) = q(line) else {
+                panic!("{line}")
+            };
+            assert_eq!(&line[offset..], text);
+            assert_eq!(column, text.chars().count());
+            assert!(text.starts_with("po"));
+        }
     }
 
     #[test]
@@ -435,7 +470,8 @@ mod tests {
     #[test]
     fn completes_command_names() {
         assert_eq!(values("br"), ["break", "breakpoints"]);
-        assert_eq!(values("con"), ["continue"]);
+        assert_eq!(values("con"), ["continue", "condition"]);
+        assert_eq!(values("wat"), ["watch", "watches"]);
         assert!(values("").len() == COMMANDS.len());
     }
 

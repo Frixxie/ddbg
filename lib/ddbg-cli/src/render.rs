@@ -14,6 +14,7 @@ use ddbg_core::session::StopReason;
 use ddbg_core::variable::Variable;
 
 use crate::parser::COMMANDS;
+use ddbg_core::watch::Watch;
 
 /// Number of source lines shown before and after the current line.
 const SOURCE_CONTEXT: usize = 2;
@@ -128,6 +129,14 @@ impl Renderer {
             }
             DebugEvent::SessionStopped(info) => Some(self.stopped(info)),
             DebugEvent::SessionContinued => None,
+            DebugEvent::WatchesChanged(watches) => {
+                let lines: Vec<_> = watches
+                    .iter()
+                    .filter(|w| w.result.is_some())
+                    .map(watch)
+                    .collect();
+                (!lines.is_empty()).then(|| lines.join("\n"))
+            }
             DebugEvent::SessionExited(code) => {
                 self.exited = true;
                 let mut out = self.flush_output();
@@ -225,6 +234,10 @@ impl Renderer {
                 elapsed_suffix(info.elapsed)
             )),
         }
+        if !info.watches.is_empty() {
+            lines.push(String::new());
+            lines.extend(info.watches.iter().map(watch));
+        }
         out.push_str(&lines.join("\n"));
         out.trim_end().to_owned()
     }
@@ -268,15 +281,39 @@ impl Renderer {
                 let mut s = format!(
                     "Breakpoint {} {} {}",
                     breakpoint.id,
-                    if *new { "at" } else { "already set at" },
+                    if *new || matches!(command, Command::Condition { .. }) {
+                        "at"
+                    } else {
+                        "already set at"
+                    },
                     self.bp_location(breakpoint)
                 );
+                if matches!(
+                    command,
+                    Command::Condition {
+                        condition: None,
+                        ..
+                    }
+                ) {
+                    s.push_str(" (condition cleared)");
+                }
                 if let Some(m) = &breakpoint.message {
                     let _ = write!(s, " ({m})");
                 }
                 Some(s)
             }
             Reply::BreakpointDeleted(id) => Some(format!("Deleted breakpoint {id}")),
+            Reply::WatchSet { watch: w, new } => Some(format!(
+                "{}{}",
+                watch(w),
+                if *new { "" } else { " (already set)" }
+            )),
+            Reply::WatchDeleted(id) => Some(format!("Deleted watch {id}")),
+            Reply::Watches(watches) => Some(if watches.is_empty() {
+                "No watches.".into()
+            } else {
+                watches.iter().map(watch).collect::<Vec<_>>().join("\n")
+            }),
             Reply::Breakpoints(bps) if bps.is_empty() => Some("No breakpoints.".into()),
             Reply::Breakpoints(bps) => Some(
                 bps.iter()
@@ -359,12 +396,16 @@ impl Renderer {
 
     fn bp_location(&self, bp: &Breakpoint) -> String {
         let line = |loc: &SourceLocation| format!("{}:{}", self.display_path(&loc.path), loc.line);
-        match (&bp.requested, &bp.resolved) {
+        let mut location = match (&bp.requested, &bp.resolved) {
             (_, Some(resolved)) if !bp.is_function() => line(resolved),
             (Location::Source(requested), _) => line(requested),
             (Location::Function(f), Some(resolved)) => format!("{f} ({})", line(resolved)),
             (Location::Function(f), None) => f.to_string(),
+        };
+        if let Some(condition) = &bp.condition {
+            let _ = write!(location, " if {condition}");
         }
+        location
     }
 }
 
@@ -403,6 +444,15 @@ fn needs_expansion(value: &str, type_name: Option<&str>) -> bool {
 
 fn variable(v: &Variable) -> String {
     format!("{} = {}", v.name, v.value)
+}
+
+pub fn watch(w: &Watch) -> String {
+    let value = match &w.result {
+        Some(Ok(v)) => v.value.clone(),
+        Some(Err(e)) => format!("<error: {e}>"),
+        None => "<unavailable>".into(),
+    };
+    format!("Watch {}: {} = {value}", w.id, w.expression)
 }
 
 pub fn help(topic: Option<&str>) -> String {
@@ -476,6 +526,7 @@ mod tests {
                 frame: Some(frame(&file, 2, "app::main")),
                 exception: None,
                 elapsed: Some(Duration::from_micros(12_345)),
+                watches: Vec::new(),
             })))
             .unwrap();
         assert_eq!(
@@ -492,6 +543,7 @@ mod tests {
                 frame: Some(frame(&file, 3, "app::main")),
                 exception: None,
                 elapsed: None,
+                watches: Vec::new(),
             })))
             .unwrap();
         assert_eq!(out, "1   fn main() {\n2       let x = 1;\n3 > }");
@@ -523,6 +575,7 @@ mod tests {
                     )],
                 )),
                 elapsed: None,
+                watches: Vec::new(),
             })))
             .unwrap();
         assert_eq!(
@@ -556,6 +609,54 @@ mod tests {
     }
 
     #[test]
+    fn breakpoint_replies_show_conditions_and_edits() {
+        use ddbg_core::breakpoint::{BreakpointId, BreakpointStore};
+        let mut store = BreakpointStore::default();
+        let (id, _) = store.add(
+            Location::Source(SourceLocation::new("main.rs", 42)),
+            Path::new("/src"),
+        );
+        store.set_condition(id, Some("count > 10".into()));
+        let bp = store.get(id).unwrap().clone();
+        let mut r = Renderer::new("/src".into());
+        let edit = Command::Condition {
+            id: BreakpointId(1),
+            condition: bp.condition.clone(),
+        };
+        assert_eq!(
+            r.reply(
+                &edit,
+                &Reply::BreakpointSet {
+                    breakpoint: bp.clone(),
+                    new: false
+                }
+            )
+            .unwrap(),
+            "Breakpoint 1 at main.rs:42 if count > 10"
+        );
+        assert!(
+            r.reply(&Command::Breakpoints, &Reply::Breakpoints(vec![bp]))
+                .unwrap()
+                .contains("main.rs:42 if count > 10")
+        );
+        store.set_condition(id, None);
+        assert_eq!(
+            r.reply(
+                &Command::Condition {
+                    id,
+                    condition: None
+                },
+                &Reply::BreakpointSet {
+                    breakpoint: store.get(id).unwrap().clone(),
+                    new: false
+                }
+            )
+            .unwrap(),
+            "Breakpoint 1 at main.rs:42 (condition cleared)"
+        );
+    }
+
+    #[test]
     fn output_is_line_buffered() {
         let mut r = Renderer::new(PathBuf::new());
         assert_eq!(r.output(OutputCategory::Stdout, "hel"), None);
@@ -568,5 +669,45 @@ mod tests {
             "wor\nProcess exited normally."
         );
         assert_eq!(r.event(&DebugEvent::SessionTerminated), None);
+    }
+
+    #[test]
+    fn watch_values_errors_and_unavailable_states_are_rendered() {
+        use ddbg_core::watch::{WatchId, WatchValue};
+        let mut w = Watch {
+            id: WatchId(1),
+            expression: "x".into(),
+            result: None,
+        };
+        assert_eq!(watch(&w), "Watch 1: x = <unavailable>");
+        let mut r = Renderer::new("/src".into());
+        assert!(
+            r.event(&DebugEvent::WatchesChanged(vec![w.clone()]))
+                .is_none()
+        );
+        w.result = Some(Ok(WatchValue {
+            value: "42".into(),
+            type_name: Some("int".into()),
+            has_children: false,
+        }));
+        let out = r
+            .event(&DebugEvent::SessionStopped(Box::new(StopInfo {
+                reason: StopReason::Pause,
+                thread: None,
+                description: None,
+                frame: None,
+                exception: None,
+                elapsed: None,
+                watches: vec![w.clone()],
+            })))
+            .unwrap();
+        assert_eq!(out, "Paused\n\nWatch 1: x = 42");
+        assert_eq!(
+            r.reply(&Command::Watches, &Reply::Watches(vec![w.clone()]))
+                .unwrap(),
+            "Watch 1: x = 42"
+        );
+        w.result = Some(Err("out of scope".into()));
+        assert_eq!(watch(&w), "Watch 1: x = <error: out of scope>");
     }
 }

@@ -46,8 +46,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     spec(
         "break",
         &["b"],
-        "break <file>:<line> | [<file>:]<function>",
-        "Set a breakpoint at a line or function",
+        "break <location> [if <expression>]",
+        "Set a line (file:line) or function ([file:]function) breakpoint with an optional condition",
+    ),
+    spec(
+        "condition",
+        &[],
+        "condition <breakpoint> [expression]",
+        "Change a breakpoint condition; omit the expression to clear it",
     ),
     spec(
         "delete",
@@ -91,6 +97,19 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Assign a value to a variable or expression",
     ),
     spec("locals", &[], "locals", "Show local variables"),
+    spec(
+        "watch",
+        &[],
+        "watch <expression>",
+        "Keep an expression and refresh it at every stop",
+    ),
+    spec(
+        "watches",
+        &[],
+        "watches",
+        "List watch expressions and their current values",
+    ),
+    spec("unwatch", &[], "unwatch <id>", "Remove a watch expression"),
     spec("tests", &[], "tests [filter]", "Discover and number tests"),
     spec(
         "test-run",
@@ -163,8 +182,26 @@ pub fn parse(line: &str) -> Result<Input, String> {
         "step" => no_args(Command::Step),
         "finish" => no_args(Command::Finish),
         "break" => {
-            let loc = parse_location(rest).ok_or_else(usage)?;
-            Ok(Input::Command(Command::Break(loc)))
+            let (location, condition) = split_break_condition(rest);
+            let location = parse_location(location).ok_or_else(usage)?;
+            Ok(Input::Command(match condition {
+                Some(condition) if !condition.is_empty() => Command::ConditionalBreak {
+                    location,
+                    condition: condition.to_owned(),
+                },
+                Some(_) => return Err(usage()),
+                None => Command::Break(location),
+            }))
+        }
+        "condition" => {
+            let (id, condition) = rest
+                .split_once(char::is_whitespace)
+                .map_or((rest, ""), |(id, expr)| (id, expr.trim()));
+            let id = id.parse().map_err(|_| usage())?;
+            Ok(Input::Command(Command::Condition {
+                id: BreakpointId(id),
+                condition: (!condition.is_empty()).then(|| condition.to_owned()),
+            }))
         }
         "delete" => {
             let id = rest.parse().map_err(|_| usage())?;
@@ -208,6 +245,19 @@ pub fn parse(line: &str) -> Result<Input, String> {
             }))
         }
         "locals" => no_args(Command::Locals),
+        "watch" => {
+            if rest.is_empty() {
+                return Err(usage());
+            }
+            Ok(Input::Command(Command::Watch(rest.to_owned())))
+        }
+        "watches" => no_args(Command::Watches),
+        "unwatch" => {
+            let id = rest.parse().map_err(|_| usage())?;
+            Ok(Input::Command(Command::Unwatch(ddbg_core::watch::WatchId(
+                id,
+            ))))
+        }
         "tests" => Ok(Input::Command(Command::Tests(TestQuery {
             filter: (!rest.is_empty()).then(|| rest.to_owned()),
         }))),
@@ -232,6 +282,22 @@ pub fn parse(line: &str) -> Result<Input, String> {
         "quit" => no_args(Command::Quit),
         other => unreachable!("unhandled command {other}"),
     }
+}
+
+/// Split off the first standalone `if` after a breakpoint location. The
+/// expression is kept verbatim, including quotes and language-specific syntax.
+pub fn split_break_condition(s: &str) -> (&str, Option<&str>) {
+    for (i, c) in s.char_indices() {
+        if c.is_whitespace() {
+            let rest = s[i..].trim_start();
+            if let Some(expr) = rest.strip_prefix("if")
+                && (expr.is_empty() || expr.starts_with(char::is_whitespace))
+            {
+                return (s[..i].trim_end(), Some(expr.trim_start()));
+            }
+        }
+    }
+    (s, None)
 }
 
 /// `file:line`, `file:function` or `function`.
@@ -424,6 +490,67 @@ mod tests {
     }
 
     #[test]
+    fn parses_conditional_breakpoints_and_condition_edits() {
+        for (line, location, condition) in [
+            (
+                "b src/main.rs:42 if count > 10",
+                Location::Source(SourceLocation::new("src/main.rs", 42)),
+                "count > 10",
+            ),
+            (
+                r#"break C:\src\a.cs:7 if name == "if : 7""#,
+                Location::Source(SourceLocation::new(r"C:\src\a.cs", 7)),
+                r#"name == "if : 7""#,
+            ),
+            (
+                "b src/lib.rs:Parser::new\tif\tready && ns::ok()",
+                Location::Function(FunctionLocation::new(
+                    "Parser::new",
+                    Some("src/lib.rs".into()),
+                )),
+                "ready && ns::ok()",
+            ),
+            (
+                "b run if x if y else z",
+                Location::Function(FunctionLocation::new("run", None)),
+                "x if y else z",
+            ),
+        ] {
+            assert_eq!(
+                cmd(line),
+                Command::ConditionalBreak {
+                    location,
+                    condition: condition.into()
+                }
+            );
+        }
+        assert_eq!(
+            cmd("condition 2 x == 3"),
+            Command::Condition {
+                id: BreakpointId(2),
+                condition: Some("x == 3".into())
+            }
+        );
+        assert_eq!(
+            cmd("condition 2"),
+            Command::Condition {
+                id: BreakpointId(2),
+                condition: None
+            }
+        );
+        assert_eq!(cmd("b if"), func("if", None));
+        for line in [
+            "b main if",
+            "b main if  ",
+            "b if x",
+            "condition",
+            "condition nope x",
+        ] {
+            assert!(parse(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
     fn parses_run_with_args() {
         let Command::Run(Some(t)) = cmd(r#"run ./app --name "two words" a\ b"#) else {
             panic!()
@@ -473,6 +600,26 @@ mod tests {
         assert!(parse("set = 1").is_err());
         assert_eq!(cmd("e x += 1"), Command::Eval("x += 1".into()));
         assert!(parse("eval").is_err());
+    }
+
+    #[test]
+    fn parses_watch_commands_and_preserves_expression_syntax() {
+        use ddbg_core::watch::WatchId;
+        assert_eq!(
+            cmd(r#"watch name == "hello world" && x > 2"#),
+            Command::Watch(r#"name == "hello world" && x > 2"#.into())
+        );
+        assert_eq!(cmd("watches"), Command::Watches);
+        assert_eq!(cmd("unwatch 3"), Command::Unwatch(WatchId(3)));
+        for line in [
+            "watch",
+            "unwatch",
+            "unwatch nope",
+            "watches x",
+            "unwatch 1 extra",
+        ] {
+            assert!(parse(line).is_err(), "{line}");
+        }
     }
 
     #[test]

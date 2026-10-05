@@ -57,7 +57,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_title(f, app, title);
     draw_source(f, app, source);
     draw_stack(f, app, stack);
-    draw_locals(f, app, locals);
+    if app.watches.is_empty() {
+        draw_locals(f, app, locals);
+    } else {
+        let [locals, watches] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(locals);
+        draw_locals(f, app, locals);
+        let lines: Vec<Line> = app
+            .watches
+            .iter()
+            .map(|w| {
+                Line::styled(
+                    ddbg_cli::render::watch(w),
+                    Style::new().fg(if matches!(w.result, Some(Err(_))) {
+                        Color::Red
+                    } else {
+                        Color::White
+                    }),
+                )
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).block(block("watches", false)),
+            watches,
+        );
+    }
     draw_breakpoints(f, app, breakpoints);
     draw_log(f, app, log);
     draw_bottom(f, app, bottom);
@@ -561,9 +586,14 @@ fn draw_breakpoints(f: &mut Frame, app: &App, area: Rect) {
                 .strip_prefix(&format!("{}/", app.cwd.display()))
                 .map(str::to_owned)
                 .unwrap_or(loc);
+            let condition = bp
+                .condition
+                .as_ref()
+                .map(|c| format!(" if {c}"))
+                .unwrap_or_default();
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(color)),
-                Span::raw(format!("{} {loc}", bp.id)),
+                Span::raw(format!("{} {loc}{condition}", bp.id)),
             ])
         })
         .collect();
