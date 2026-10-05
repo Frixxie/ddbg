@@ -283,6 +283,28 @@ ignored. Use Up/Down or Ctrl-P/Ctrl-N to move and Esc to close.
 The function picker scans source files in the project (Rust, C#, Python,
 C/C++) and skips build and virtualenv directories.
 
+## MCP server
+
+`ddbg mcp` serves the debugger to AI agents over the
+[Model Context Protocol](https://modelcontextprotocol.io) on stdin/stdout.
+Example client configuration:
+
+```json
+{ "mcpServers": { "ddbg": { "command": "ddbg", "args": ["mcp"] } } }
+```
+
+One debug session is active at a time. Call `start_session` with the project
+directory (detection works as for the CLI), then use `set_breakpoint`, `run`,
+`continue`, `next`, `step`, `finish`, `pause`, `wait`, `kill`, `backtrace`,
+`threads`, `select_thread`, `select_frame`, `evaluate`, `set_value`, `locals`,
+`list_tests`, `run_test`, `debug_test`, `get_output` and `end_session`. `repl`
+runs any REPL command line. Resuming tools wait until the program stops,
+exits or terminates; after `timeout_ms` (default 30 s) they report `running`.
+While a call waits, `pause`, `kill` and `end_session` act immediately. Results
+contain the REPL's text rendering plus structured JSON.
+Logging works as in the CLI (`--log-dap`, `DDBG_LOG`) and never writes to
+stdout.
+
 ## Development
 
 ```console

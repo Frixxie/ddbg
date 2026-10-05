@@ -35,6 +35,11 @@ pub struct Prepared {
     /// Program the engine starts with, if one was given or detected. When
     /// `None`, frontends can offer [`Session::candidates`] to pick from.
     pub program: Option<std::path::PathBuf>,
+    /// Kind of the detected project, if any.
+    pub project: Option<ProjectKind>,
+    /// Messages about project detection (chosen target, unbuilt binaries,
+    /// multiple candidates). [`start`] prints them to stderr.
+    pub notes: Vec<String>,
 }
 
 /// Entry point used by the `ddbg` binary when no other frontend is chosen.
@@ -50,6 +55,12 @@ pub async fn run_with(args: Args) -> anyhow::Result<()> {
     }
 }
 
+/// Initialize logging as configured by `--log-dap` and `DDBG_LOG`. Logs go
+/// to a file, never to stdout or stderr.
+pub fn init_logging(args: &Args) -> anyhow::Result<()> {
+    logging::init(args)
+}
+
 /// Initialize logging and handle subcommands. Returns `None` when a
 /// subcommand ran to completion, otherwise the prepared debug session.
 pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
@@ -59,8 +70,15 @@ pub async fn start(args: &Args) -> anyhow::Result<Option<Prepared>> {
         adapter_test::run(adapter).await?;
         return Ok(None);
     }
+    if let Some(Subcommand::Mcp) = &args.command {
+        anyhow::bail!("`ddbg mcp` is handled by the ddbg binary");
+    }
 
-    prepare(args, std::env::current_dir()?).map(Some)
+    let prepared = prepare(args, std::env::current_dir()?)?;
+    for note in &prepared.notes {
+        eprintln!("{note}");
+    }
+    Ok(Some(prepared))
 }
 
 /// Build a debug session from `args` as if `ddbg` was started in `cwd`,
@@ -76,8 +94,9 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
     } else {
         None
     };
+    let mut notes = Vec::new();
     if let Some(project) = &project {
-        target = discover_target(project);
+        target = discover_target(project, &mut notes);
     }
     if let Some(t) = &mut target {
         t.cwd.clone_from(&cwd);
@@ -146,6 +165,8 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
         initial,
         verbose: args.verbose,
         program,
+        project: test_project.map(|p| p.kind),
+        notes,
     })
 }
 
@@ -193,7 +214,7 @@ fn default_adapter(kind: Option<&ProjectKind>, root: &std::path::Path) -> Arc<dy
 }
 
 /// Pick a binary to debug.
-fn discover_target(project: &Project) -> Option<LaunchTarget> {
+fn discover_target(project: &Project, notes: &mut Vec<String>) -> Option<LaunchTarget> {
     tracing::debug!(?project, "detected project");
     let Some(binary) = project.binary.clone() else {
         if !project.candidates.is_empty() {
@@ -205,12 +226,12 @@ fn discover_target(project: &Project) -> Option<LaunchTarget> {
                     rel.display().to_string()
                 })
                 .collect();
-            eprintln!(
+            notes.push(format!(
                 "{:?} project at {}: multiple binaries:\n  {}\nuse `run <name>` to pick one",
                 project.kind,
                 project.root.display(),
                 names.join("\n  "),
-            );
+            ));
         }
         return None;
     };
@@ -224,11 +245,11 @@ fn discover_target(project: &Project) -> Option<LaunchTarget> {
             ProjectKind::Python => " (not found)",
         }
     };
-    eprintln!(
+    notes.push(format!(
         "{:?} project at {}: target {}{note}",
         project.kind,
         project.root.display(),
         binary.display()
-    );
+    ));
     Some(LaunchTarget::new(binary, Vec::new()))
 }

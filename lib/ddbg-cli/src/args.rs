@@ -52,6 +52,8 @@ pub enum Subcommand {
         #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
         adapter: Vec<String>,
     },
+    /// Serve the debugger to AI agents over the Model Context Protocol (stdio).
+    Mcp,
 }
 
 #[cfg(test)]

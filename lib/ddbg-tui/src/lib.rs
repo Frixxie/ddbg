@@ -117,6 +117,7 @@ pub async fn run(prepared: Prepared) -> anyhow::Result<()> {
         initial,
         verbose,
         program,
+        ..
     } = prepared;
     let (tx, mut rx) = mpsc::unbounded_channel();
 

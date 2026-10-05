@@ -51,6 +51,19 @@ pub use ddbg_core::session::StopReason;
 /// Default time to wait for the program to stop, exit or terminate.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Error returned when the program did not halt within the timeout. The
+/// program may still be running; detect it with `anyhow::Error::downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeout(pub Duration);
+
+impl std::fmt::Display for Timeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "timed out after {:?} waiting for the debugger", self.0)
+    }
+}
+
+impl std::error::Error for Timeout {}
+
 /// Why the program is no longer running after a resuming command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)] // short-lived, one per command
@@ -158,6 +171,15 @@ impl Debugger {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Change how long resuming commands wait for the program to halt.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     pub fn session(&self) -> &Session {
@@ -520,10 +542,7 @@ impl Debugger {
         let deadline = tokio::time::Instant::now() + self.timeout;
         loop {
             let ev = match tokio::time::timeout_at(deadline, self.events.recv()).await {
-                Err(_) => bail!(
-                    "timed out after {:?} waiting for the debugger",
-                    self.timeout
-                ),
+                Err(_) => return Err(Timeout(self.timeout).into()),
                 Ok(Err(RecvError::Closed)) => bail!("the debug engine has shut down"),
                 Ok(Err(RecvError::Lagged(_))) => continue,
                 Ok(Ok(ev)) => ev,
@@ -561,6 +580,18 @@ impl Debugger {
 
     fn take_pending(&mut self) -> String {
         std::mem::take(&mut self.pending).join("\n")
+    }
+
+    /// Text the REPL would have printed for events (stops, program output,
+    /// exit) since the previous call to this method or [`Debugger::exec`].
+    pub fn take_transcript(&mut self) -> String {
+        self.drain();
+        self.take_pending()
+    }
+
+    /// The REPL renderer, for presenting replies from [`Debugger::execute`].
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
     }
 
     /// Program stdout received so far.

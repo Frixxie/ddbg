@@ -1,20 +1,24 @@
 [package]
-name = "ddbg-driver"
+name = "ddbg-mcp"
 version.workspace = true
 edition.workspace = true
-description = "Test driver for ddbg"
+description = "Model Context Protocol server for the ddbg debugger"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-ddbg-core.workspace = true
-ddbg-cli.workspace = true
 anyhow.workspace = true
+ddbg-cli.workspace = true
+ddbg-core.workspace = true
+ddbg-driver.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-ddbg-dap.workspace = true
-serde_json.workspace = true
+rmcp = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
