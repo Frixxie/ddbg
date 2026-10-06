@@ -98,6 +98,14 @@ pub struct RunParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AttachParams {
+    /// Local process ID (must be greater than zero). Uses the session's adapter.
+    pub pid: u32,
+    /// How long to wait for the process to halt after attaching (default 30000).
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetBreakpointParams {
     /// Source file, relative to the session directory or absolute. Combine with
     /// `line` for a line breakpoint, or with `function` to scope a function
@@ -249,6 +257,7 @@ fn to_value(v: impl Serialize) -> Value {
 
 enum Resume {
     Run(Option<(String, Vec<String>)>),
+    Attach(u32),
     Continue,
     Next,
     Step,
@@ -278,6 +287,7 @@ impl DdbgServer {
         let result = match cmd {
             Resume::Run(None) => dbg.run().await,
             Resume::Run(Some((p, a))) => dbg.run_program(p, a).await,
+            Resume::Attach(pid) => dbg.attach(pid).await,
             Resume::Continue => dbg.cont().await,
             Resume::Next => dbg.next().await,
             Resume::Step => dbg.step().await,
@@ -448,6 +458,26 @@ impl DdbgServer {
     async fn run(&self, Parameters(p): Parameters<RunParams>) -> ToolResult {
         let target = p.program.map(|prog| (prog, p.args));
         self.resume(Resume::Run(target), p.timeout_ms).await
+    }
+
+    #[tool(
+        description = "Attach to an existing local process using the session's adapter and wait until it halts or the timeout passes. Call start_session first. End_session detaches without killing the attached process."
+    )]
+    async fn attach(&self, Parameters(p): Parameters<AttachParams>) -> ToolResult {
+        self.resume(Resume::Attach(p.pid), p.timeout_ms).await
+    }
+
+    #[tool(
+        description = "Detach from the process, leaving it running. The session stays open. Also usable while another call waits for the process to halt."
+    )]
+    async fn detach(&self) -> ToolResult {
+        let Some(engine) = self.engine() else {
+            return no_session();
+        };
+        match engine.execute(Command::Detach).await {
+            Ok(_) => text("Detached; the process is left running."),
+            Err(e) => fail(e),
+        }
     }
 
     #[tool(

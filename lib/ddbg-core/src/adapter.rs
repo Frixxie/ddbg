@@ -351,6 +351,31 @@ mod tests {
     }
 
     #[test]
+    fn attach_arguments_use_each_adapters_pid_field() {
+        let t = AttachTarget { pid: 42 };
+        let lldb = LldbDapAdapter {
+            init_commands: vec!["command script import formatters.py".into()],
+            ..Default::default()
+        }
+        .build_attach_request(&t)
+        .unwrap();
+        assert_eq!(lldb["pid"], 42);
+        assert_eq!(lldb["request"], "attach");
+        assert_eq!(
+            lldb["initCommands"],
+            json!(["command script import formatters.py"])
+        );
+        let net = NetCoreDbgAdapter::default()
+            .build_attach_request(&t)
+            .unwrap();
+        assert_eq!(net["processId"], 42);
+        assert_eq!(net["request"], "attach");
+        let python = DebugpyAdapter::default().build_attach_request(&t).unwrap();
+        assert_eq!(python["processId"], 42);
+        assert_eq!(python["request"], "attach");
+    }
+
+    #[test]
     fn picks_adapter_by_command_name() {
         assert_eq!(
             adapter_for_command("/usr/bin/netcoredbg", vec![]).id(),

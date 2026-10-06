@@ -18,4 +18,4 @@ pub use engine::{EngineConfig, EngineHandle};
 pub use error::{Error, Result};
 pub use event::DebugEvent;
 pub use session::{DebugSession, SessionStatus};
-pub use target::{DebugTarget, LaunchTarget};
+pub use target::{AttachTarget, DebugTarget, LaunchTarget};

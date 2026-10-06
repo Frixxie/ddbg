@@ -62,7 +62,7 @@ async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
         };
         send(&mut io, Message::Response(resp)).await;
         let events: &[(&str, Value)] = match req.command.as_str() {
-            "launch" => &[("initialized", json!({}))],
+            "launch" | "attach" => &[("initialized", json!({}))],
             "configurationDone" => &[(
                 "stopped",
                 json!({"reason": "breakpoint", "threadId": 1, "hitBreakpointIds": [1]}),
@@ -127,6 +127,23 @@ async fn typed_session() {
     assert_eq!(dbg.cont().await.unwrap(), Halt::Exited(0));
     assert_eq!(dbg.stdout(), "done\n");
     assert!(dbg.backtrace().await.is_err());
+}
+
+#[tokio::test]
+async fn attach_and_detach_through_typed_and_text_commands() {
+    let mut dbg = debugger();
+    assert!(dbg.attach(42).await.unwrap().is_stopped());
+    assert_eq!(dbg.local("x").await.unwrap().value, "42");
+    dbg.detach().await.unwrap();
+    assert_eq!(dbg.wait().await.unwrap(), Halt::Terminated);
+    assert!(dbg.run().await.is_err());
+    let transcript = dbg.exec("attach 42").await.unwrap();
+    assert!(
+        transcript.contains("Attached to process 42"),
+        "{transcript}"
+    );
+    assert!(dbg.exec("detach").await.unwrap().contains("left running"));
+    dbg.quit().await.unwrap();
 }
 
 #[tokio::test]

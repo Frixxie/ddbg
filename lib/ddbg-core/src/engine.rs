@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use ddbg_dap::client::channel_closed;
 use ddbg_dap::protocol::{
-    self as dap, CompletionsArguments, ConfigurationDoneArguments, ContinueArguments, DapEvent,
-    DisconnectArguments, EvaluateArguments, ExceptionInfoArguments, InitializeArguments,
-    LaunchArguments, NextArguments, PauseArguments, ScopesArguments, SetExpressionArguments,
-    SetVariableArguments, StackTraceArguments, StepInArguments, StepOutArguments, ThreadsArguments,
-    VariablesArguments,
+    self as dap, AttachArguments, CompletionsArguments, ConfigurationDoneArguments,
+    ContinueArguments, DapEvent, DisconnectArguments, EvaluateArguments, ExceptionInfoArguments,
+    InitializeArguments, LaunchArguments, NextArguments, PauseArguments, ScopesArguments,
+    SetExpressionArguments, SetVariableArguments, StackTraceArguments, StepInArguments,
+    StepOutArguments, ThreadsArguments, VariablesArguments,
 };
 use ddbg_dap::{AdapterProcess, DapClient, Incoming};
 use tokio::process::Child;
@@ -31,13 +31,14 @@ use crate::error::{
 };
 use crate::event::{DebugEvent, ExceptionInfo, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
-use crate::target::{DebugTarget, LaunchTarget};
+use crate::target::{AttachTarget, DebugTarget, LaunchTarget};
 use crate::thread::{Thread, ThreadId};
 use crate::variable::{Evaluation, VarRef, Variable};
 use crate::watch::{WatchId, WatchValue};
 
 const MAX_CHILDREN: usize = 100;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A live adapter connection.
 pub struct Connection {
@@ -137,6 +138,8 @@ pub fn spawn_with_connector(config: EngineConfig, connector: Connector) -> Engin
 struct ActiveConnection {
     client: DapClient,
     child: Option<Child>,
+    /// Cleanup policy belongs to this connection, not the next desired target.
+    attached: bool,
 }
 
 struct Engine {
@@ -220,6 +223,19 @@ impl Engine {
     async fn execute(&mut self, cmd: Command) -> Result<Reply> {
         match cmd {
             Command::Run(target) => self.cmd_run(target).await,
+            Command::Attach(target) => self.cmd_attach(target).await,
+            Command::Detach => {
+                if !self.session.status.is_active() {
+                    bail!(NOT_RUNNING);
+                }
+                if !self.conn.as_ref().is_some_and(|c| c.attached)
+                    && !self.session.supports(Feature::TerminateDebuggee)
+                {
+                    bail!("the debug adapter does not support detaching from a launched process");
+                }
+                self.disconnect(false).await?;
+                Ok(Reply::Ok)
+            }
             Command::Continue => {
                 let tid = self.require_stopped()?;
                 self.resumed_at = Some(Instant::now());
@@ -245,7 +261,14 @@ impl Engine {
                 if !self.session.status.is_active() {
                     bail!(NOT_RUNNING);
                 }
-                self.shutdown().await;
+                if self.conn.as_ref().is_some_and(|c| c.attached)
+                    && !self.session.supports(Feature::TerminateDebuggee)
+                {
+                    bail!(
+                        "the debug adapter does not support terminating an attached process; use `detach`"
+                    );
+                }
+                self.disconnect(true).await?;
                 Ok(Reply::Ok)
             }
             Command::Next => {
@@ -519,14 +542,17 @@ impl Engine {
         let target = match &self.session.target {
             Some(DebugTarget::Launch(t)) => t.clone(),
             Some(DebugTarget::Attach(_)) => {
-                return Err(anyhow!("attach is not implemented yet"));
+                bail!("the current target is attached; use `attach <pid>` or `run <program>`")
             }
             None => bail!(NO_TARGET),
         };
         if self.conn.is_some() {
             self.shutdown().await;
         }
-        match self.launch(&target).await {
+        match self
+            .start_target(&DebugTarget::Launch(target.clone()))
+            .await
+        {
             Ok(()) => Ok(Reply::Launched(target.absolute_program())),
             Err(e) => {
                 self.shutdown().await;
@@ -535,16 +561,49 @@ impl Engine {
         }
     }
 
-    /// DAP lifecycle: initialize → launch → `initialized` → setBreakpoints
-    /// → configurationDone → launch response.
-    async fn launch(&mut self, target: &LaunchTarget) -> Result<()> {
-        let launch_args = self.adapter.build_launch_request(&with_color_env(target))?;
+    async fn cmd_attach(&mut self, target: AttachTarget) -> Result<Reply> {
+        if target.pid == 0 {
+            bail!("process ID must be greater than zero");
+        }
+        // Validate arguments before replacing a live session.
+        self.adapter.build_attach_request(&target)?;
+        self.shutdown().await;
+        self.session.target = Some(DebugTarget::Attach(target.clone()));
+        match self
+            .start_target(&DebugTarget::Attach(target.clone()))
+            .await
+        {
+            Ok(()) => Ok(Reply::Attached(target.pid)),
+            Err(e) => {
+                self.shutdown().await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn start_target(&mut self, target: &DebugTarget) -> Result<()> {
+        tokio::time::timeout(STARTUP_TIMEOUT, self.start(target))
+            .await
+            .map_err(|_| anyhow!("debug adapter startup timed out after {STARTUP_TIMEOUT:?}"))?
+    }
+
+    /// Shared DAP lifecycle: initialize → launch/attach → `initialized`
+    /// → breakpoints → configurationDone → launch/attach response.
+    async fn start(&mut self, target: &DebugTarget) -> Result<()> {
+        let (args, attached) = match target {
+            DebugTarget::Launch(t) => (
+                self.adapter.build_launch_request(&with_color_env(t))?,
+                false,
+            ),
+            DebugTarget::Attach(t) => (self.adapter.build_attach_request(t)?, true),
+        };
         let conn = (self.connector)(self.adapter.as_ref())?;
         let client = conn.client.clone();
         let mut incoming = conn.incoming;
         self.conn = Some(ActiveConnection {
             client: client.clone(),
             child: conn.child,
+            attached,
         });
         self.session.status = SessionStatus::Initializing;
         self.session.exit_code = None;
@@ -556,7 +615,7 @@ impl Engine {
         self.session.capabilities = caps;
 
         // Conditions can be configured before capabilities are known. Refuse
-        // the launch rather than silently installing unconditional breakpoints.
+        // startup rather than silently installing unconditional breakpoints.
         if self
             .session
             .breakpoints
@@ -567,13 +626,17 @@ impl Engine {
             bail!(NO_CONDITIONAL_BREAKPOINTS);
         }
 
-        let mut launch = client.send(LaunchArguments(launch_args))?;
-        let mut launched = false;
+        let mut start_response = if attached {
+            client.send(AttachArguments(args))?
+        } else {
+            client.send(LaunchArguments(args))?
+        };
+        let mut started = false;
         loop {
             tokio::select! {
-                r = &mut launch, if !launched => {
+                r = &mut start_response, if !started => {
                     r?;
-                    launched = true;
+                    started = true;
                 }
                 msg = incoming.recv() => match msg {
                     Some(Incoming::Event(DapEvent::Initialized)) => break,
@@ -583,7 +646,9 @@ impl Engine {
             }
         }
 
-        self.session.status = SessionStatus::Configuring;
+        if matches!(self.session.status, SessionStatus::Initializing) {
+            self.session.status = SessionStatus::Configuring;
+        }
         for file in self.session.breakpoints.files() {
             self.sync_breakpoints(&file).await?;
         }
@@ -594,8 +659,8 @@ impl Engine {
         if self.session.supports(Feature::ConfigurationDone) {
             client.request(ConfigurationDoneArguments {}).await?;
         }
-        if !launched {
-            launch.await?;
+        if !started {
+            start_response.await?;
         }
         self.incoming = Some(incoming);
         // A `stopped` event (e.g. stop-on-entry) may already have arrived.
@@ -1337,17 +1402,26 @@ impl Engine {
         Ok(true)
     }
 
-    /// Disconnect from the adapter (terminating the debuggee) and reset state.
+    /// End the session: launched processes terminate, attached ones detach.
     async fn shutdown(&mut self) {
+        let terminate = self.conn.as_ref().is_some_and(|c| !c.attached);
+        if let Err(e) = self.disconnect(terminate).await {
+            tracing::warn!("could not disconnect debug adapter: {e}");
+        }
+    }
+
+    async fn disconnect(&mut self, terminate: bool) -> Result<()> {
         self.pause_pending = false;
         let Some(mut conn) = self.conn.take() else {
-            return;
+            return Ok(());
         };
-        let terminate = self.session.supports(Feature::TerminateDebuggee);
-        let _ = tokio::time::timeout(
+        let result = tokio::time::timeout(
             SHUTDOWN_TIMEOUT,
             conn.client.request(DisconnectArguments {
-                terminate_debuggee: terminate.then_some(true),
+                terminate_debuggee: self
+                    .session
+                    .supports(Feature::TerminateDebuggee)
+                    .then_some(terminate),
             }),
         )
         .await;
@@ -1364,6 +1438,8 @@ impl Engine {
         if was_active {
             self.emit(DebugEvent::SessionTerminated);
         }
+        result.map_err(|_| anyhow!("debug adapter disconnect timed out"))??;
+        Ok(())
     }
 }
 

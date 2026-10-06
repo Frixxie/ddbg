@@ -19,7 +19,7 @@ use ddbg_core::adapter::{
     DebugAdapter, DebugpyAdapter, LldbDapAdapter, NetCoreDbgAdapter, adapter_for_command,
 };
 use ddbg_core::command::Command;
-use ddbg_core::{EngineConfig, LaunchTarget, engine};
+use ddbg_core::{AttachTarget, EngineConfig, LaunchTarget, engine};
 use ddbg_project::{Project, ProjectKind};
 use ddbg_test::{AnyProvider, DotNetTestProvider, RustTestProvider};
 
@@ -95,7 +95,9 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
         None
     };
     let mut notes = Vec::new();
-    if let Some(project) = &project {
+    if let Some(project) = &project
+        && args.attach.is_none()
+    {
         target = discover_target(project, &mut notes);
     }
     if let Some(t) = &mut target {
@@ -123,6 +125,9 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
     };
 
     let mut initial = Vec::new();
+    if let Some(pid) = args.attach {
+        initial.push(Command::Attach(AttachTarget { pid }));
+    }
     if args.run || (args.stop_on_entry && target.is_some()) {
         initial.push(Command::Run(None));
     }
@@ -252,4 +257,32 @@ fn discover_target(project: &Project, notes: &mut Vec<String>) -> Option<LaunchT
         binary.display()
     ));
     Some(LaunchTarget::new(binary, Vec::new()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attach_uses_project_adapter_without_discovering_a_launch_target() {
+        let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/hello-python")
+            .canonicalize()
+            .unwrap();
+        let args = Args::try_parse_from(["ddbg", "--attach", "42"]).unwrap();
+        let prepared = prepare(&args, cwd).unwrap();
+        assert_eq!(prepared.project, Some(ProjectKind::Python));
+        assert!(prepared.program.is_none());
+        assert!(prepared.notes.is_empty());
+        assert_eq!(
+            prepared.initial,
+            vec![Command::Attach(AttachTarget { pid: 42 })]
+        );
+        prepared
+            .session
+            .engine
+            .execute(Command::Quit)
+            .await
+            .unwrap();
+    }
 }

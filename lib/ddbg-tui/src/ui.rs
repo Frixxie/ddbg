@@ -332,7 +332,12 @@ fn draw_title(f: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(Color::Magenta),
         ));
     }
-    if let Some(program) = &app.program {
+    if let Some(pid) = app.attached_pid {
+        spans.push(Span::styled(
+            format!("  PID {pid} (attach target)"),
+            Style::new().fg(Color::Cyan),
+        ));
+    } else if let Some(program) = &app.program {
         let name = program.strip_prefix(&app.cwd).unwrap_or(program).display();
         spans.push(Span::styled(
             format!("  {name}"),

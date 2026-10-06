@@ -69,6 +69,8 @@ async fn lists_tools_and_identifies_as_ddbg() {
     for expected in [
         "start_session",
         "run",
+        "attach",
+        "detach",
         "continue",
         "set_breakpoint",
         "set_breakpoint_condition",
@@ -90,6 +92,89 @@ async fn tools_require_a_session() {
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn attach_validates_pid_and_detach_requires_an_active_process() {
+    let client = connect().await;
+    call(&client, "start_session", json!({"no_detect": true})).await;
+    for (tool, args) in [("attach", json!({"pid": 0})), ("detach", json!({}))] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+    }
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires lldb-dap, cc, and OS permission to attach"]
+async fn detach_interrupts_wait_and_end_session_preserves_attached_process() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("ddbg-mcp-attach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("attach-native");
+    assert!(
+        Process::new("cc")
+            .args(["-g", "-O0"])
+            .arg(fixture("attach-native").join("main.c"))
+            .arg("-o")
+            .arg(&bin)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = tokio::process::Command::new(&bin)
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let client = connect().await;
+    call(
+        &client,
+        "start_session",
+        json!({
+            "cwd": dir, "no_detect": true, "adapter": "lldb-dap"
+        }),
+    )
+    .await;
+    let attached = call(
+        &client,
+        "attach",
+        json!({"pid": child.id().unwrap(), "timeout_ms": 100}),
+    )
+    .await;
+    if attached["state"] == "stopped" {
+        call(&client, "continue", json!({"timeout_ms": 100})).await;
+    } else {
+        assert_eq!(attached["state"], "running", "{attached}");
+    }
+    let waiting = call(&client, "wait", json!({"timeout_ms": 10000}));
+    let detach = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        call_raw(&client, "detach", json!({})).await
+    };
+    let (halt, detached) = tokio::join!(waiting, detach);
+    assert_eq!(halt["state"], "terminated", "{halt}");
+    assert!(summary(&detached).contains("left running"));
+    assert!(child.try_wait().unwrap().is_none());
+    call(
+        &client,
+        "attach",
+        json!({"pid": child.id().unwrap(), "timeout_ms": 100}),
+    )
+    .await;
+    call(&client, "end_session", json!({})).await;
+    assert!(child.try_wait().unwrap().is_none());
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
     client.cancel().await.unwrap();
 }
 

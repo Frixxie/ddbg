@@ -134,9 +134,23 @@ impl Fake {
                     )
                     .await
                 }
-                "launch" => {
-                    self.respond(&req, json!({})).await;
+                "attach" if self.caps["testRejectAttach"] == true => {
+                    self.reject(&req, "no such process").await;
+                }
+                "launch" | "attach" => {
+                    if self.caps["testDeferredStart"] != true {
+                        self.respond(&req, json!({})).await;
+                    }
+                    if self.caps["testEarlyStop"] == true {
+                        self.event("stopped", json!({"reason": "pause", "threadId": 1})).await;
+                    }
                     self.event("initialized", json!({})).await;
+                    // For deferred startup, configurationDone must be processed
+                    // before the start response; save its request sequence.
+                    if self.caps["testDeferredStart"] == true {
+                        self.caps["testStartRequest"] = json!(req.seq);
+                        self.caps["testStartCommand"] = json!(req.command);
+                    }
                 }
                 "setBreakpoints" => {
                     let bps: Vec<Value> = args["breakpoints"]
@@ -164,6 +178,14 @@ impl Fake {
                 }
                 "configurationDone" => {
                     self.respond(&req, json!({})).await;
+                    if self.caps["testDeferredStart"] == true {
+                        let start = Request {
+                            seq: self.caps["testStartRequest"].as_i64().unwrap(),
+                            command: self.caps["testStartCommand"].as_str().unwrap().into(),
+                            arguments: None,
+                        };
+                        self.respond(&start, json!({})).await;
+                    }
                     if self.caps["testRunningLaunch"] != true {
                         self.event(
                         "stopped",
@@ -432,6 +454,144 @@ fn last_args(args: &Args, command: &str) -> Value {
         .find(|(c, _)| c == command)
         .map(|(_, a)| a.clone())
         .unwrap_or_else(|| panic!("no {command} request"))
+}
+
+fn attach(pid: u32) -> Command {
+    Command::Attach(ddbg_core::AttachTarget { pid })
+}
+
+#[tokio::test]
+async fn attach_configures_breakpoints_and_watches_before_deferred_response() {
+    let (e, log, args) = engine_with(json!({"testDeferredStart": true}));
+    let mut rx = e.subscribe();
+    e.execute(Command::Break(Location::Source(SourceLocation::new(
+        "/src/main.rs",
+        5,
+    ))))
+    .await
+    .unwrap();
+    e.execute(Command::Watch("x".into())).await.unwrap();
+    assert_eq!(e.execute(attach(42)).await.unwrap(), Reply::Attached(42));
+    wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionStopped(_))).await;
+    assert_eq!(last_args(&args, "attach")["pid"], 42);
+    assert_eq!(requests(&log, "launch"), 0);
+    assert_eq!(
+        &log.lock().unwrap()[..4],
+        &[
+            "initialize",
+            "attach",
+            "setBreakpoints",
+            "configurationDone"
+        ]
+    );
+    let Reply::Watches(watches) = e.execute(Command::Watches).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(watches.len(), 1);
+    e.execute(Command::Detach).await.unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], false);
+    assert!(
+        e.execute(Command::Run(None))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("current target is attached")
+    );
+    assert_eq!(e.execute(attach(42)).await.unwrap(), Reply::Attached(42));
+    assert_eq!(requests(&log, "setBreakpoints"), 2);
+    e.execute(Command::Quit).await.unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], false);
+}
+
+#[tokio::test]
+async fn attach_shutdown_policy_follows_the_active_connection() {
+    let (e, _, args) = engine_with(json!({}));
+    e.execute(Command::Run(None)).await.unwrap();
+    e.execute(attach(42)).await.unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], true);
+    e.execute(Command::Run(Some(LaunchTarget::new("/bin/other", vec![]))))
+        .await
+        .unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], false);
+    e.execute(Command::Quit).await.unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], true);
+}
+
+#[tokio::test]
+async fn attached_process_only_terminates_on_explicit_kill() {
+    let (e, _, args) = engine_with(json!({}));
+    e.execute(attach(42)).await.unwrap();
+    e.execute(Command::Kill).await.unwrap();
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], true);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn attach_without_termination_capability_detaches_but_refuses_kill() {
+    let (e, log, args) = engine_with(json!({"supportTerminateDebuggee": false}));
+    e.execute(attach(42)).await.unwrap();
+    assert!(
+        e.execute(Command::Kill)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support terminating")
+    );
+    assert_eq!(requests(&log, "disconnect"), 0);
+    e.execute(Command::Quit).await.unwrap();
+    assert!(
+        last_args(&args, "disconnect")
+            .get("terminateDebuggee")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn rejected_attach_cleans_up_without_termination_and_can_launch_again() {
+    let (e, _, args) = engine_with(json!({"testRejectAttach": true}));
+    assert!(
+        e.execute(attach(42))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no such process")
+    );
+    assert_eq!(last_args(&args, "disconnect")["terminateDebuggee"], false);
+    e.execute(Command::Run(Some(LaunchTarget::new("/bin/app", vec![]))))
+        .await
+        .unwrap();
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn attach_preserves_a_stop_received_before_initialized() {
+    let (e, _, _) = engine_with(json!({"testEarlyStop": true, "testRunningLaunch": true}));
+    e.execute(attach(42)).await.unwrap();
+    assert!(matches!(
+        *e.subscribe_halt().borrow(),
+        Some(DebugEvent::SessionStopped(_))
+    ));
+    e.execute(Command::Next).await.unwrap();
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_pid_does_not_replace_a_live_session() {
+    let (e, log, _) = engine_with(json!({}));
+    e.execute(Command::Run(None)).await.unwrap();
+    assert!(e.execute(attach(0)).await.is_err());
+    assert_eq!(requests(&log, "attach"), 0);
+    assert_eq!(requests(&log, "disconnect"), 0);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn detach_from_launched_process_requires_termination_override() {
+    let (e, log, _) = engine_with(json!({"supportTerminateDebuggee": false}));
+    e.execute(Command::Run(None)).await.unwrap();
+    assert!(e.execute(Command::Detach).await.is_err());
+    assert_eq!(requests(&log, "disconnect"), 0);
+    e.execute(Command::Quit).await.unwrap();
 }
 
 fn conditional(location: Location, condition: &str) -> Command {

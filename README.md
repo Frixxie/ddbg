@@ -141,6 +141,7 @@ Process exited normally.
 |---|---|
 | `-- <program> [args...]` | Program to debug and its arguments |
 | `--run` | Launch immediately instead of waiting for `run` |
+| `--attach <pid>` | Attach immediately to an existing local process |
 | `--tui` | Full-screen terminal UI (experimental, see [Terminal UI](#terminal-ui)) |
 | `--stop-on-entry` | Launch and stop at the program entry point |
 | `--no-detect` | Disable project and program auto-detection |
@@ -156,6 +157,8 @@ Process exited normally.
 | Command | Alias | Description |
 |---|---|---|
 | `run [program [args...]]` | `r` | Start (or restart) the program |
+| `attach <pid>` | | Attach to an existing local process using the session's adapter |
+| `detach` | | Disconnect and leave the process running |
 | `continue` | `c` | Resume execution |
 | `pause` | | Interrupt the program (also Ctrl-C) |
 | `kill` | `k` | Terminate the program |
@@ -216,6 +219,44 @@ breakpoint IDs for `condition` and expressions after `if` or the ID.
 For function breakpoints, prefer qualified names (e.g. `hello_rust::add`)
 when a short name could also match other functions. Invalid expressions and
 condition evaluation errors are reported according to the adapter's behavior.
+
+### Attaching to a process
+
+```console
+ddbg --attach 12345
+ddbg --adapter "netcoredbg --interpreter=vscode" --attach 12345
+# Or from the REPL/TUI command line:
+ddbg> attach 12345
+ddbg> pause
+ddbg> backtrace
+ddbg> detach
+```
+
+Attach is local and PID-based. The adapter is selected from the current project,
+or defaults to LLDB; a PID alone does not identify the language. Use `--adapter`
+when the process does not match the current project. `--attach` cannot be combined
+with a program, `--run`, or `--stop-on-entry`.
+
+Breakpoints and watch expressions survive detach and reattach. Attachment does
+not guarantee an immediate stop; use `pause` if the process continues running.
+`run` does not restart an attached process: use `attach <pid>` to reattach or
+`run <program>` to switch to launching.
+
+**Quitting, ending an MCP session, or replacing an attached session detaches
+without killing the external process.** `kill` explicitly requests termination
+and fails if the adapter cannot terminate an attached process. Detaching a
+launched process requires the adapter's termination-override capability.
+
+OS debugging permissions still apply (e.g. Linux ptrace restrictions and macOS
+debugging authorization). Python PID attach uses debugpy injection and is
+experimental; it may require additional platform tooling and permissions.
+Remote/socket attach is not supported. Adapter startup is bounded to 30 seconds;
+control commands can queue behind the startup handshake until it completes or
+times out. Driver/MCP halt-wait timeouts apply after startup completes.
+
+The driver exposes `Debugger::attach(pid)` and `Debugger::detach()`. MCP exposes
+`attach { pid, timeout_ms? }` and `detach` after `start_session`; `detach` remains
+usable while another tool is waiting for the process to halt.
 
 ### Watch expressions
 

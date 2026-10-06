@@ -160,6 +160,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attach_reply_replaces_program_identity() {
+        let mut app = test_app();
+        app.program = Some("old-program".into());
+        app.outcome(
+            Outcome::Reply(
+                Command::Attach(ddbg_core::AttachTarget { pid: 42 }),
+                Reply::Attached(42),
+            ),
+            false,
+        );
+        assert_eq!(app.attached_pid, Some(42));
+        assert!(app.program.is_none());
+        app.outcome(
+            Outcome::Reply(Command::Run(None), Reply::Launched("new-program".into())),
+            false,
+        );
+        assert_eq!(app.attached_pid, None);
+        assert_eq!(app.program, Some("new-program".into()));
+    }
+
+    #[tokio::test]
     async fn breakpoint_interval_sums_run_time_across_steps() {
         use ddbg_core::event::StopInfo;
         use std::time::Duration;
@@ -400,6 +421,7 @@ pub struct App {
     pub candidates: Vec<PathBuf>,
     /// Program the next `run` launches, if known.
     pub program: Option<PathBuf>,
+    pub attached_pid: Option<u32>,
 }
 
 impl App {
@@ -454,6 +476,7 @@ impl App {
             files: None,
             candidates,
             program,
+            attached_pid: None,
         }
     }
 
@@ -614,10 +637,16 @@ impl App {
                 }
                 // The engine relaunches its last target (e.g. a debugged
                 // test) on `r`, so don't fall back to the program picker.
-                if let Reply::Launched(path) = &reply
-                    && self.program.is_none()
-                {
-                    self.program = Some(path.clone());
+                match &reply {
+                    Reply::Launched(path) => {
+                        self.program = Some(path.clone());
+                        self.attached_pid = None;
+                    }
+                    Reply::Attached(pid) => {
+                        self.program = None;
+                        self.attached_pid = Some(*pid);
+                    }
+                    _ => {}
                 }
                 self.apply_reply(reply);
             }
@@ -839,7 +868,11 @@ impl App {
             KeyCode::Tab => self.focus = self.focus.next(),
 
             // Nothing to run yet: let the user choose first.
-            KeyCode::Char('r') if self.program.is_none() && !self.candidates.is_empty() => {
+            KeyCode::Char('r')
+                if self.program.is_none()
+                    && self.attached_pid.is_none()
+                    && !self.candidates.is_empty() =>
+            {
                 self.open_program_picker()
             }
             KeyCode::Char('r') => self.execute(Command::Run(None)),

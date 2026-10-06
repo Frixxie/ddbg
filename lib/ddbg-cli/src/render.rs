@@ -272,11 +272,13 @@ impl Renderer {
         match reply {
             Reply::Ok => match command {
                 Command::Continue => Some("Continuing.".into()),
+                Command::Detach => Some("Detached; the process is left running.".into()),
                 _ => None,
             },
             Reply::Launched(program) => {
                 Some(format!("Starting program: {}", self.display_path(program)))
             }
+            Reply::Attached(pid) => Some(format!("Attached to process {pid}.")),
             Reply::BreakpointSet { breakpoint, new } => {
                 let mut s = format!(
                     "Breakpoint {} {} {}",

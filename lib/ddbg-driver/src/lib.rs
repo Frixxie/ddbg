@@ -43,7 +43,7 @@ use ddbg_core::frame::StackFrame;
 use ddbg_core::thread::{Thread, ThreadId};
 use ddbg_core::variable::{Evaluation, Variable};
 use ddbg_core::watch::{Watch, WatchId};
-use ddbg_core::{DebugEvent, EngineHandle, LaunchTarget};
+use ddbg_core::{AttachTarget, DebugEvent, EngineHandle, LaunchTarget};
 use tokio::sync::broadcast::{self, error::RecvError, error::TryRecvError};
 
 pub use ddbg_cli::TestCase;
@@ -278,6 +278,18 @@ impl Debugger {
     /// `run`: start (or restart) the current program.
     pub async fn run(&mut self) -> Result<Halt> {
         self.resume(Command::Run(None)).await
+    }
+
+    /// Attach to a local process and wait until it halts (or times out).
+    pub async fn attach(&mut self, pid: u32) -> Result<Halt> {
+        self.resume(Command::Attach(AttachTarget { pid })).await
+    }
+
+    /// Disconnect and leave the process running.
+    pub async fn detach(&mut self) -> Result<()> {
+        self.execute(Command::Detach).await?;
+        self.drain();
+        Ok(())
     }
 
     /// `run <program> [args...]`. Bare names resolve against detected
@@ -681,6 +693,7 @@ fn resumes(cmd: &Command) -> bool {
     matches!(
         cmd,
         Command::Run(_)
+            | Command::Attach(_)
             | Command::Continue
             | Command::Next
             | Command::Step

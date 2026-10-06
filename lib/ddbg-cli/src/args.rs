@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long)]
     pub run: bool,
 
+    /// Attach immediately to an existing local process.
+    #[arg(long, value_name = "PID", value_parser = clap::value_parser!(u32).range(1..), conflicts_with_all = ["run", "stop_on_entry", "program"])]
+    pub attach: Option<u32>,
+
     /// Disable auto-discovery of the project and binary to debug.
     #[arg(long)]
     pub no_detect: bool,
@@ -65,6 +69,20 @@ mod tests {
         let a = Args::try_parse_from(["ddbg", "--run", "--", "./foo", "-x", "1"]).unwrap();
         assert!(a.run);
         assert_eq!(a.program, ["./foo", "-x", "1"]);
+    }
+
+    #[test]
+    fn attach_requires_a_positive_pid_and_conflicts_with_launch_options() {
+        let a = Args::try_parse_from(["ddbg", "--attach", "42"]).unwrap();
+        assert_eq!(a.attach, Some(42));
+        for args in [
+            vec!["ddbg", "--attach", "0"],
+            vec!["ddbg", "--attach", "42", "--run"],
+            vec!["ddbg", "--attach", "42", "--stop-on-entry"],
+            vec!["ddbg", "--attach", "42", "--", "app"],
+        ] {
+            assert!(Args::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

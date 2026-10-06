@@ -1,9 +1,9 @@
 //! Text → [`Command`] parsing. Aliases exist only here.
 
-use ddbg_core::LaunchTarget;
 use ddbg_core::breakpoint::{BreakpointId, FunctionLocation, SourceLocation};
 use ddbg_core::command::{Command, FrameSelector, Location, TestQuery, TestSelector};
 use ddbg_core::thread::ThreadId;
+use ddbg_core::{AttachTarget, LaunchTarget};
 
 /// A parsed REPL line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         &["r"],
         "run [program [args...]]",
         "Start the program (restarts if running)",
+    ),
+    spec(
+        "attach",
+        &[],
+        "attach <pid>",
+        "Attach to an existing local process using the session's adapter",
+    ),
+    spec(
+        "detach",
+        &[],
+        "detach",
+        "Disconnect and leave the process running",
     ),
     spec("continue", &["c"], "continue", "Resume execution"),
     spec(
@@ -175,6 +187,14 @@ pub fn parse(line: &str) -> Result<Input, String> {
                 .map(|(program, args)| LaunchTarget::new(program, args.to_vec()));
             Ok(Input::Command(Command::Run(target)))
         }
+        "attach" => {
+            let pid = rest.parse::<u32>().map_err(|_| usage())?;
+            if pid == 0 {
+                return Err(usage());
+            }
+            Ok(Input::Command(Command::Attach(AttachTarget { pid })))
+        }
+        "detach" => no_args(Command::Detach),
         "continue" => no_args(Command::Continue),
         "pause" => no_args(Command::Pause),
         "kill" => no_args(Command::Kill),
@@ -426,6 +446,22 @@ pub fn split_words(s: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_attach_and_detach() {
+        assert_eq!(cmd("attach 42"), Command::Attach(AttachTarget { pid: 42 }));
+        assert_eq!(cmd("detach"), Command::Detach);
+        for line in [
+            "attach",
+            "attach 0",
+            "attach -1",
+            "attach 4294967296",
+            "attach 42 extra",
+            "detach extra",
+        ] {
+            assert!(parse(line).is_err(), "{line}");
+        }
+    }
     use quickcheck_macros::quickcheck;
 
     #[quickcheck]

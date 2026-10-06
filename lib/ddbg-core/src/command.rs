@@ -3,7 +3,7 @@
 use crate::breakpoint::{Breakpoint, BreakpointId};
 pub use crate::breakpoint::{FunctionLocation, Location};
 use crate::frame::StackFrame;
-use crate::target::LaunchTarget;
+use crate::target::{AttachTarget, LaunchTarget};
 use crate::thread::{Thread, ThreadId};
 use crate::variable::{Evaluation, VarRef, Variable};
 use crate::watch::{Watch, WatchId};
@@ -12,6 +12,10 @@ use crate::watch::{Watch, WatchId};
 pub enum Command {
     /// Launch the given target, or the last one when `None`.
     Run(Option<LaunchTarget>),
+    /// Attach to an existing local process.
+    Attach(AttachTarget),
+    /// Disconnect and leave the debuggee running.
+    Detach,
     Continue,
     Pause,
     Kill,
@@ -103,6 +107,7 @@ pub enum Reply {
     Ok,
     /// The program was launched under the debugger.
     Launched(std::path::PathBuf),
+    Attached(u32),
     BreakpointSet {
         breakpoint: Breakpoint,
         new: bool,
