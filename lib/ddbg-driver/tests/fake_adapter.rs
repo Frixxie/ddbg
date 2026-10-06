@@ -12,7 +12,7 @@ use ddbg_driver::{Debugger, Halt, StopReason};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-async fn fake(mut io: DuplexStream) {
+async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
     let mut decoder = Decoder::new();
     let mut buf = vec![0u8; 16 * 1024];
     let mut seq = 0;
@@ -68,7 +68,7 @@ async fn fake(mut io: DuplexStream) {
                 json!({"reason": "breakpoint", "threadId": 1, "hitBreakpointIds": [1]}),
             )],
             "next" => &[("stopped", json!({"reason": "step", "threadId": 1}))],
-            "continue" => &[
+            "continue" if exit_on_continue => &[
                 ("output", json!({"category": "stdout", "output": "done\n"})),
                 ("exited", json!({"exitCode": 0})),
                 ("terminated", json!({})),
@@ -88,6 +88,10 @@ async fn fake(mut io: DuplexStream) {
 }
 
 fn debugger() -> Debugger {
+    debugger_with_exit(true)
+}
+
+fn debugger_with_exit(exit_on_continue: bool) -> Debugger {
     let config = EngineConfig {
         adapter: Arc::new(LldbDapAdapter::default()),
         cwd: "/".into(),
@@ -95,11 +99,11 @@ fn debugger() -> Debugger {
     };
     let engine = spawn_with_connector(
         config,
-        Box::new(|_| {
+        Box::new(move |_| {
             let (a, b) = tokio::io::duplex(64 * 1024);
             let (r, w) = tokio::io::split(a);
             let (client, incoming) = DapClient::connect(r, w);
-            tokio::spawn(fake(b));
+            tokio::spawn(fake(b, exit_on_continue));
             Ok(Connection {
                 client,
                 incoming,
@@ -123,6 +127,61 @@ async fn typed_session() {
     assert_eq!(dbg.cont().await.unwrap(), Halt::Exited(0));
     assert_eq!(dbg.stdout(), "done\n");
     assert!(dbg.backtrace().await.is_err());
+}
+
+#[tokio::test]
+async fn wait_retains_halt_after_kill_and_event_consumption() {
+    let mut dbg = debugger();
+    let stop = dbg.run().await.unwrap();
+    assert!(stop.is_stopped());
+    dbg.take_transcript();
+    assert_eq!(dbg.wait().await.unwrap(), stop);
+    dbg.kill().await.unwrap();
+    dbg.take_transcript();
+    dbg.set_timeout(std::time::Duration::ZERO);
+    assert_eq!(dbg.wait().await.unwrap(), Halt::Terminated);
+    assert_eq!(dbg.wait().await.unwrap(), Halt::Terminated);
+    dbg.set_timeout(std::time::Duration::from_secs(5));
+    dbg.run().await.unwrap().into_stopped().unwrap();
+    dbg.next().await.unwrap().into_stopped().unwrap();
+    dbg.quit().await.unwrap();
+}
+
+#[tokio::test]
+async fn wait_observes_exit_that_arrived_between_calls() {
+    use ddbg_core::command::Command;
+    let mut dbg = debugger();
+    dbg.run().await.unwrap().into_stopped().unwrap();
+    dbg.execute(Command::Continue).await.unwrap();
+    dbg.wait_for(|ev| matches!(ev, ddbg_core::DebugEvent::SessionExited(_)))
+        .await
+        .unwrap();
+    // Same event drain MCP performs before a subsequent wait (or output read).
+    dbg.take_transcript();
+    dbg.set_timeout(std::time::Duration::ZERO);
+    assert_eq!(dbg.wait().await.unwrap(), Halt::Exited(0));
+    assert_eq!(dbg.wait().await.unwrap(), Halt::Exited(0));
+    dbg.set_timeout(std::time::Duration::from_secs(5));
+    dbg.run().await.unwrap().into_stopped().unwrap();
+    dbg.quit().await.unwrap();
+}
+
+#[tokio::test]
+async fn kill_interrupts_a_pending_wait() {
+    let mut dbg = debugger_with_exit(false);
+    dbg.run().await.unwrap().into_stopped().unwrap();
+    dbg.engine()
+        .execute(ddbg_core::command::Command::Continue)
+        .await
+        .unwrap();
+    let engine = dbg.engine().clone();
+    let (halt, killed) = tokio::join!(dbg.wait(), async {
+        tokio::task::yield_now().await;
+        engine.execute(ddbg_core::command::Command::Kill).await
+    });
+    killed.unwrap();
+    assert_eq!(halt.unwrap(), Halt::Terminated);
+    dbg.quit().await.unwrap();
 }
 
 #[tokio::test]

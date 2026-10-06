@@ -254,6 +254,8 @@ async fn debug_rust_program() {
     assert!(output["stdout"].as_str().unwrap().contains("hello: 7"));
     let output = call(&client, "get_output", json!({})).await;
     assert_eq!(output["stdout"], "");
+    let repeated_exit = call(&client, "wait", json!({"timeout_ms": 0})).await;
+    assert_eq!(repeated_exit, exit);
 
     call(&client, "end_session", json!({})).await;
     client.cancel().await.unwrap();
@@ -316,6 +318,16 @@ async fn pause_interrupts_a_waiting_call() {
         "{stopped}"
     );
     assert!(summary(&pause).contains("Pause requested"), "{pause:?}");
+
+    call(&client, "kill", json!({})).await;
+    for _ in 0..2 {
+        let terminal = call(&client, "wait", json!({"timeout_ms": 0})).await;
+        assert_eq!(terminal["state"], "terminated", "{terminal}");
+    }
+    let restarted = call(&client, "run", json!({"timeout_ms": 0})).await;
+    assert_eq!(restarted["state"], "running", "{restarted}");
+    let stopped = call(&client, "pause", json!({"timeout_ms": 5000})).await;
+    assert_eq!(stopped["state"], "stopped", "{stopped}");
 
     // `end_session` also works while a call waits.
     call(&client, "continue", json!({ "timeout_ms": 500 })).await;

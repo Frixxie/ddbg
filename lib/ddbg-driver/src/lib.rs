@@ -573,21 +573,37 @@ impl Debugger {
 
     /// Wait until the program stops, exits or terminates.
     pub async fn wait(&mut self) -> Result<Halt> {
-        let ev = self
-            .wait_for(|e| {
-                matches!(
-                    e,
-                    DebugEvent::SessionStopped(_)
-                        | DebugEvent::SessionExited(_)
-                        | DebugEvent::SessionTerminated
-                )
-            })
-            .await?;
-        Ok(match ev {
-            DebugEvent::SessionStopped(info) => Halt::Stopped(*info),
-            DebugEvent::SessionExited(code) => Halt::Exited(code),
-            _ => Halt::Terminated,
-        })
+        let mut halt = self.engine().subscribe_halt();
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        loop {
+            self.drain();
+            // Event consumers (output/transcript/MCP) may already have drained
+            // the halt event. The engine retains it until the next resume.
+            if let Some(ev) = halt.borrow_and_update().clone() {
+                return Ok(match ev {
+                    DebugEvent::SessionStopped(info) => Halt::Stopped(*info),
+                    DebugEvent::SessionExited(code) => Halt::Exited(code),
+                    DebugEvent::SessionTerminated => Halt::Terminated,
+                    _ => unreachable!("engine publishes only halt events"),
+                });
+            }
+            tokio::select! {
+                result = halt.changed() => {
+                    result.map_err(|_| anyhow!("the debug engine has shut down"))?;
+                }
+                ev = self.events.recv() => match ev {
+                    Ok(ev) => self.record(&ev),
+                    Err(RecvError::Lagged(_)) => {},
+                    Err(RecvError::Closed) => bail!("the debug engine has shut down"),
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    // A concurrent halt at the deadline is not a running result.
+                    if halt.borrow().is_none() {
+                        return Err(Timeout(self.timeout).into());
+                    }
+                }
+            }
+        }
     }
 
     /// Wait for the next event matching `pred`. Other events are recorded

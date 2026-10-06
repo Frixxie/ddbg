@@ -260,8 +260,15 @@ ddbg> test-debug 2
 
 .NET support covers xUnit v3 test projects on Microsoft.Testing.Platform
 (`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`).
-Running a single row of a `[Theory]` runs all of that method's rows. Other
+Run and debug select the discovered display name, including a `[Theory]` row's
+arguments, rather than running all of the method's rows. Display names must be
+unique; names beginning or ending in `*` are rejected to avoid wildcard selection. Other
 MTP frameworks are listed but cannot be run or debugged individually yet.
+
+Debugger exit codes are reported by the adapter, not independently verified by
+ddbg. Some netcoredbg/runtime combinations have reported zero for a non-zero
+.NET process exit. Use the ordinary test runner to verify pass/fail results;
+a debugger-reported zero alone is not proof of success.
 
 ## Terminal UI
 
@@ -370,6 +377,12 @@ and `remove_watch` takes an `id`. Stopped results include watch summaries and
 per-expression errors. The driver exposes `Debugger::watch`, `watches`, and
 `unwatch`, and `StopInfo::watches` contains the values at that stop.
 
+`wait` returns the current stopped or terminal state even if its event was
+already consumed by another tool. Launching or resuming clears that state.
+If `pause` is requested before the adapter exposes a live thread, ddbg retries
+thread discovery until it can interrupt or the program stops/exits. A tool
+timeout limits the wait, not the lifetime of that pending pause request.
+
 ## Development
 
 ```console
@@ -384,6 +397,12 @@ have `debugpy`):
 
 ```console
 cargo test -p ddbg-core -p ddbg-driver -- --ignored
+```
+
+The driver's .NET regression also requires SDK 10 and `netcoredbg` on PATH:
+
+```console
+cargo test -p ddbg-driver --test netcoredbg --locked -- --ignored
 ```
 
 ### Layout

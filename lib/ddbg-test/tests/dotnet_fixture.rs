@@ -47,6 +47,37 @@ async fn discover_run_and_debug_target() {
     assert!(t.program.exists());
     assert_eq!(
         t.args[..2],
-        ["--filter-method", "HelloTests.CalculatorTests.Adds"]
+        ["--filter-display-name", "HelloTests.CalculatorTests.Adds"]
     );
+
+    for row in all.iter().filter(|t| t.name.contains("AddsMany(")) {
+        let run = p.run(std::slice::from_ref(&row.id)).await.unwrap();
+        assert_eq!(run.results[0].outcome, TestOutcome::Passed);
+        assert!(
+            run.results[0].output.contains("total: 1"),
+            "{}",
+            run.results[0].output
+        );
+
+        let DebugTarget::Launch(target) = p.debug_target(&row.id).await.unwrap() else {
+            panic!("expected launch");
+        };
+        assert_eq!(
+            target.args[..2],
+            ["--filter-display-name", row.name.as_str()]
+        );
+        // Execute exactly the launch arguments the debugger receives. Checking
+        // only ddbg's rendered result count would miss method-wide execution.
+        let output = tokio::process::Command::new("dotnet")
+            .arg(&target.program)
+            .args(&target.args)
+            .envs(&target.env)
+            .current_dir(&target.cwd)
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("total: 1"), "{stdout}");
+    }
 }

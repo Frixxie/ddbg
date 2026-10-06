@@ -18,7 +18,7 @@ use ddbg_dap::protocol::{
 };
 use ddbg_dap::{AdapterProcess, DapClient, Incoming};
 use tokio::process::Child;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::adapter::DebugAdapter;
 use crate::breakpoint::{Breakpoint, BreakpointId};
@@ -76,6 +76,7 @@ type CommandMsg = (Command, oneshot::Sender<Result<Reply>>);
 pub struct EngineHandle {
     cmd_tx: mpsc::Sender<CommandMsg>,
     events: broadcast::Sender<DebugEvent>,
+    halt: watch::Receiver<Option<DebugEvent>>,
 }
 
 impl EngineHandle {
@@ -92,6 +93,12 @@ impl EngineHandle {
     pub fn subscribe(&self) -> broadcast::Receiver<DebugEvent> {
         self.events.subscribe()
     }
+
+    /// Persistent halt state, independent of consumption of the event stream.
+    /// `None` means no completed halt; launch/resume clears the previous halt.
+    pub fn subscribe_halt(&self) -> watch::Receiver<Option<DebugEvent>> {
+        self.halt.clone()
+    }
 }
 
 /// Start the engine task.
@@ -103,6 +110,7 @@ pub fn spawn(config: EngineConfig) -> EngineHandle {
 pub fn spawn_with_connector(config: EngineConfig, connector: Connector) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
     let (events, _) = broadcast::channel(1024);
+    let (halt_tx, halt) = watch::channel(None);
     let engine = Engine {
         session: DebugSession {
             target: config.target.map(DebugTarget::Launch),
@@ -115,9 +123,15 @@ pub fn spawn_with_connector(config: EngineConfig, connector: Connector) -> Engin
         cwd: config.cwd,
         events: events.clone(),
         resumed_at: None,
+        halt: halt_tx,
+        pause_pending: false,
     };
     tokio::spawn(engine.run(cmd_rx));
-    EngineHandle { cmd_tx, events }
+    EngineHandle {
+        cmd_tx,
+        events,
+        halt,
+    }
 }
 
 struct ActiveConnection {
@@ -135,6 +149,9 @@ struct Engine {
     events: broadcast::Sender<DebugEvent>,
     /// When the debuggee last resumed, for timing the next stop.
     resumed_at: Option<Instant>,
+    halt: watch::Sender<Option<DebugEvent>>,
+    /// A pause requested before the adapter exposes its first live thread.
+    pause_pending: bool,
 }
 
 async fn recv_incoming(rx: &mut Option<mpsc::UnboundedReceiver<Incoming>>) -> Option<Incoming> {
@@ -146,6 +163,8 @@ async fn recv_incoming(rx: &mut Option<mpsc::UnboundedReceiver<Incoming>>) -> Op
 
 impl Engine {
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<CommandMsg>) {
+        let mut pause_retry = tokio::time::interval(Duration::from_millis(50));
+        pause_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 cmd = cmd_rx.recv() => {
@@ -160,12 +179,30 @@ impl Engine {
                 msg = recv_incoming(&mut self.incoming) => {
                     self.handle_incoming(msg).await;
                 }
+                _ = pause_retry.tick(), if self.pause_pending => {
+                    if let Err(e) = self.try_pause().await {
+                        tracing::warn!("could not pause during startup: {e}");
+                    }
+                }
             }
         }
         self.shutdown().await;
     }
 
     fn emit(&self, event: DebugEvent) {
+        match &event {
+            DebugEvent::SessionContinued => {
+                self.halt.send_replace(None);
+            }
+            DebugEvent::SessionStopped(_) | DebugEvent::SessionExited(_) => {
+                self.halt.send_replace(Some(event.clone()));
+            }
+            DebugEvent::SessionTerminated if self.session.exit_code.is_none() => {
+                // Preserve an adapter-reported exit code across disconnect.
+                self.halt.send_replace(Some(event.clone()));
+            }
+            _ => {}
+        }
         let _ = self.events.send(event);
     }
 
@@ -197,19 +234,11 @@ impl Engine {
                 if !matches!(self.session.status, SessionStatus::Running) {
                     bail!(NOT_RUNNING);
                 }
-                let client = self.client()?;
-                let tid = match self.session.selected_thread {
-                    Some(t) => t,
-                    None => {
-                        self.refresh_threads().await?;
-                        self.session
-                            .threads
-                            .first()
-                            .map(|t| t.id)
-                            .ok_or_else(|| anyhow!(NO_THREAD))?
-                    }
-                };
-                client.request(PauseArguments { thread_id: tid.0 }).await?;
+                self.pause_pending = true;
+                if let Err(e) = self.try_pause().await {
+                    self.pause_pending = false;
+                    return Err(e);
+                }
                 Ok(Reply::Ok)
             }
             Command::Kill => {
@@ -470,6 +499,7 @@ impl Engine {
 
     /// Execution resumed: no frame/variable reference survives this.
     fn mark_resumed(&mut self, announce: bool) {
+        self.halt.send_replace(None);
         self.session.on_resume();
         let was_stopped = self.session.status.is_stopped();
         self.session.status = SessionStatus::Running;
@@ -518,6 +548,7 @@ impl Engine {
         });
         self.session.status = SessionStatus::Initializing;
         self.session.exit_code = None;
+        self.halt.send_replace(None);
 
         let caps = client
             .request(InitializeArguments::new(self.adapter.id()))
@@ -1027,6 +1058,28 @@ impl Engine {
         Ok(())
     }
 
+    async fn try_pause(&mut self) -> Result<()> {
+        if !matches!(self.session.status, SessionStatus::Running) {
+            self.pause_pending = false;
+            return Ok(());
+        }
+        self.refresh_threads().await?;
+        let tid = self
+            .session
+            .selected_thread
+            .filter(|id| self.session.threads.iter().any(|t| t.id == *id))
+            .or_else(|| self.session.threads.first().map(|t| t.id));
+        if let Some(tid) = tid {
+            self.client()?
+                .request(PauseArguments { thread_id: tid.0 })
+                .await?;
+            self.pause_pending = false;
+        }
+        // No threads yet: retry from the main loop, keeping incoming events
+        // and interruption commands usable instead of sleeping inside a command.
+        Ok(())
+    }
+
     async fn load_stack(&mut self, tid: ThreadId) -> Result<()> {
         let resp = self
             .client()?
@@ -1121,7 +1174,10 @@ impl Engine {
                 }
             }
             DapEvent::Exited(e) => {
+                self.pause_pending = false;
                 self.session.exit_code = Some(e.exit_code);
+                self.session.on_resume();
+                self.session.status = SessionStatus::Terminated;
                 self.emit(DebugEvent::SessionExited(e.exit_code));
             }
             DapEvent::Terminated => self.shutdown().await,
@@ -1159,6 +1215,7 @@ impl Engine {
     }
 
     async fn on_stopped(&mut self, s: dap::StoppedEvent) -> Result<()> {
+        self.pause_pending = false;
         let hit_bps: Vec<Breakpoint> = s
             .hit_breakpoint_ids
             .iter()
@@ -1282,6 +1339,7 @@ impl Engine {
 
     /// Disconnect from the adapter (terminating the debuggee) and reset state.
     async fn shutdown(&mut self) {
+        self.pause_pending = false;
         let Some(mut conn) = self.conn.take() else {
             return;
         };
@@ -1301,7 +1359,7 @@ impl Engine {
             let _ = child.kill().await;
         }
         self.incoming = None;
-        let was_active = self.session.status.is_active();
+        let was_active = self.session.status.is_active() || self.session.exit_code.is_some();
         self.session.on_terminated();
         if was_active {
             self.emit(DebugEvent::SessionTerminated);

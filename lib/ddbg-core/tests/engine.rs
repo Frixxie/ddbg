@@ -28,6 +28,7 @@ struct Fake {
     caps: Value,
     watch_value: String,
     args: Arc<Mutex<Vec<(String, Value)>>>,
+    thread_queries: u64,
 }
 
 impl Fake {
@@ -163,15 +164,29 @@ impl Fake {
                 }
                 "configurationDone" => {
                     self.respond(&req, json!({})).await;
-                    self.event(
+                    if self.caps["testRunningLaunch"] != true {
+                        self.event(
                         "stopped",
                         json!({"reason": "breakpoint", "threadId": 1, "hitBreakpointIds": [1]}),
                     )
                     .await;
+                    }
                 }
                 "threads" => {
-                    self.respond(&req, json!({"threads": [{"id": 1, "name": "main"}]}))
-                        .await
+                    self.thread_queries += 1;
+                    if self.caps["testNeverThreads"] == true || self.thread_queries <= self.caps["testEmptyThreadResponses"].as_u64().unwrap_or(0) {
+                        self.respond(&req, json!({"threads": []})).await;
+                    } else {
+                        self.respond(&req, json!({"threads": [{"id": 1, "name": "main"}]})).await;
+                    }
+                    if self.caps["testExitOnThreads"] == true {
+                        self.event("exited", json!({"exitCode": 2})).await;
+                        self.event("terminated", json!({})).await;
+                    }
+                }
+                "pause" => {
+                    self.respond(&req, json!({})).await;
+                    self.event("stopped", json!({"reason": "pause", "threadId": 1})).await;
                 }
                 "stackTrace" => {
                     self.respond(
@@ -291,6 +306,7 @@ fn engine_with(caps: Value) -> (EngineHandle, Log, Args) {
                     caps: caps.clone(),
                     watch_value: "42".into(),
                     args: args2.clone(),
+                    thread_queries: 0,
                 }
                 .run(),
             );
@@ -322,6 +338,61 @@ async fn wait_for(
 
 fn requests(log: &Log, name: &str) -> usize {
     log.lock().unwrap().iter().filter(|c| *c == name).count()
+}
+
+#[tokio::test]
+async fn pause_retries_until_the_first_thread_is_available() {
+    let (e, log, args) = engine_with(json!({
+        "testRunningLaunch": true, "testEmptyThreadResponses": 3
+    }));
+    let mut rx = e.subscribe();
+    e.execute(Command::Run(None)).await.unwrap();
+    assert_eq!(e.execute(Command::Pause).await.unwrap(), Reply::Ok);
+    let ev = wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionStopped(_))).await;
+    let DebugEvent::SessionStopped(info) = ev else {
+        unreachable!()
+    };
+    assert_eq!(info.reason, StopReason::Pause);
+    assert!(requests(&log, "threads") >= 4);
+    assert_eq!(last_args(&args, "pause")["threadId"], 1);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_startup_pause_observes_exit_without_pausing_a_dead_thread() {
+    let (e, log, _) = engine_with(json!({
+        "testRunningLaunch": true, "testNeverThreads": true, "testExitOnThreads": true
+    }));
+    let mut rx = e.subscribe();
+    e.execute(Command::Run(None)).await.unwrap();
+    e.execute(Command::Pause).await.unwrap();
+    wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionExited(2))).await;
+    assert_eq!(requests(&log, "pause"), 0);
+    assert_eq!(
+        *e.subscribe_halt().borrow(),
+        Some(DebugEvent::SessionExited(2))
+    );
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_startup_pause_does_not_block_kill_or_restart() {
+    let (e, _, _) = engine_with(json!({
+        "testRunningLaunch": true, "testNeverThreads": true
+    }));
+    e.execute(Command::Run(None)).await.unwrap();
+    e.execute(Command::Pause).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), e.execute(Command::Kill))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *e.subscribe_halt().borrow(),
+        Some(DebugEvent::SessionTerminated)
+    );
+    e.execute(Command::Run(None)).await.unwrap();
+    assert_eq!(*e.subscribe_halt().borrow(), None);
+    e.execute(Command::Quit).await.unwrap();
 }
 
 async fn start_stopped_at_breakpoint() -> (EngineHandle, Log, broadcast::Receiver<DebugEvent>) {

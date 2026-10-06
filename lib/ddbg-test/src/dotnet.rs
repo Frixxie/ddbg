@@ -14,7 +14,7 @@
 //! server mode (phase B) will provide stable test-node UIDs for all
 //! frameworks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -128,6 +128,15 @@ impl TestProvider for DotNetTestProvider {
         let mut cases = Vec::new();
         for asm in self.build().await? {
             let (framework, names) = self.list(&asm).await?;
+            let mut seen = BTreeSet::new();
+            for name in names.iter().filter(|n| query.matches(n)) {
+                if !seen.insert(name) {
+                    bail!(
+                        "test display name `{name}` is not unique in {}; cannot select it exactly",
+                        asm.assembly.display()
+                    );
+                }
+            }
             let mut sources = None;
             for name in names.into_iter().filter(|n| query.matches(n)) {
                 let mut case = test_case(&asm, &framework, name);
@@ -238,10 +247,19 @@ fn test_env() -> BTreeMap<String, String> {
     BTreeMap::from([("TESTINGPLATFORM_TELEMETRY_OPTOUT".into(), "1".into())])
 }
 
-/// Arguments selecting a single test (all rows, for a data-driven test).
+/// Select the discovered display name, including arguments for a theory row.
 fn filter_args(framework: &Framework, name: &str) -> anyhow::Result<Vec<String>> {
     match framework {
-        Framework::XUnitV3 => Ok(vec!["--filter-method".into(), method_name(name).into()]),
+        Framework::XUnitV3 => {
+            // xUnit interprets leading/trailing '*' as wildcards. Never silently
+            // broaden an exact selection into a potentially side-effecting run.
+            if name.starts_with('*') || name.ends_with('*') {
+                bail!(
+                    "cannot select test `{name}` exactly: xUnit treats leading/trailing '*' as wildcards"
+                );
+            }
+            Ok(vec!["--filter-display-name".into(), name.into()])
+        }
         Framework::Other(banner) => bail!(
             "running single tests is not supported for this framework yet ({banner}); \
              only xUnit v3 is supported"
@@ -551,8 +569,21 @@ Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
         assert_eq!(c.suite.as_deref(), Some("Ns.C"));
         assert_eq!(
             filter_args(&Framework::XUnitV3, &c.name).unwrap(),
-            ["--filter-method", "Ns.C.M"]
+            ["--filter-display-name", "Ns.C.M(a: 1)"]
         );
+    }
+
+    #[test]
+    fn exact_filter_preserves_arguments_and_rejects_wildcards() {
+        for name in ["Ns.C.M(a: \"*\", b: \"(x)\")", "Custom fact name"] {
+            assert_eq!(
+                filter_args(&Framework::XUnitV3, name).unwrap(),
+                ["--filter-display-name", name]
+            );
+        }
+        for name in ["*custom", "custom*"] {
+            assert!(filter_args(&Framework::XUnitV3, name).is_err());
+        }
     }
 
     #[test]
