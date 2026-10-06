@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ddbg_cli::output::{PlainOutput, plain_text};
 use ddbg_cli::testing::render_list;
 use ddbg_cli::{Args, Parser};
 use ddbg_core::EngineHandle;
@@ -43,6 +44,8 @@ struct State {
     /// Bytes of stdout/stderr already returned by `get_output`.
     stdout_seen: usize,
     stderr_seen: usize,
+    stdout_plain: PlainOutput,
+    stderr_plain: PlainOutput,
 }
 
 #[derive(Clone)]
@@ -201,6 +204,12 @@ pub struct ReplParams {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionInfo {
+    pub version: &'static str,
+    /// Source revision (+dirty for local changes); unknown in source archives
+    /// unless DDBG_BUILD_REVISION was supplied at build time.
+    pub build_revision: &'static str,
+    /// Build time as Unix seconds (SOURCE_DATE_EPOCH for reproducible builds).
+    pub build_timestamp: &'static str,
     pub cwd: String,
     /// Detected project kind: Rust, C, DotNet or Python.
     pub project: Option<String>,
@@ -226,13 +235,15 @@ fn ok(summary: Option<String>, value: impl Serialize) -> ToolResult {
     };
     let mut result = CallToolResult::structured(value);
     if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
-        result.content.insert(0, ContentBlock::text(s));
+        result.content.insert(0, ContentBlock::text(plain_text(&s)));
     }
     Ok(result)
 }
 
 fn text(t: impl Into<String>) -> ToolResult {
-    Ok(CallToolResult::success(vec![ContentBlock::text(t.into())]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        plain_text(&t.into()),
+    )]))
 }
 
 fn fail(e: anyhow::Error) -> ToolResult {
@@ -299,7 +310,13 @@ impl DdbgServer {
         dbg.set_timeout(previous);
         let transcript = dbg.take_transcript();
         match result {
-            Ok(h) => ok(Some(transcript), HaltDto::from(h)),
+            Ok(h) => {
+                let mut value = to_value(HaltDto::from(h));
+                if let Some(result) = dbg.debug_test_result() {
+                    value["test_result"] = to_value(DebugTestResultDto::from(result));
+                }
+                ok(Some(transcript), value)
+            }
             Err(e) if e.downcast_ref::<Timeout>().is_some() => {
                 let mut summary = transcript;
                 if !summary.is_empty() {
@@ -309,12 +326,13 @@ impl DdbgServer {
                     "The program is still running after {timeout:?}; \
                      call `wait` to keep waiting or `pause` to interrupt it."
                 ));
-                ok(
-                    Some(summary),
-                    HaltDto::Running {
-                        timeout_ms: timeout.as_millis() as u64,
-                    },
-                )
+                let mut value = to_value(HaltDto::Running {
+                    timeout_ms: timeout.as_millis() as u64,
+                });
+                if let Some(result) = dbg.debug_test_result() {
+                    value["test_result"] = to_value(DebugTestResultDto::from(result));
+                }
+                ok(Some(summary), value)
             }
             Err(e) => fail(e),
         }
@@ -352,7 +370,8 @@ impl DdbgServer {
     #[tool(
         description = "Start a debug session, replacing any existing one. Detects the \
         project (Rust, C/C++, .NET, Python) and debug adapter like the `ddbg` CLI. The program \
-        is not launched until `run` unless `stop_on_entry` is set."
+        is not launched until `run` unless `stop_on_entry` is set. Entry-stop startup is \
+        asynchronous: call `wait` to observe the stop before inspecting frames or resuming."
     )]
     async fn start_session(&self, Parameters(p): Parameters<StartSessionParams>) -> ToolResult {
         if let Some(engine) = self.engine.lock().unwrap().take() {
@@ -398,7 +417,10 @@ impl DdbgServer {
             let engine = dbg.engine().clone();
             tokio::spawn(async move { engine.execute(cmd).await });
         }
-        let info = SessionInfo {
+        let mut info = SessionInfo {
+            version: env!("CARGO_PKG_VERSION"),
+            build_revision: ddbg_cli::BUILD_REVISION,
+            build_timestamp: ddbg_cli::BUILD_TIMESTAMP,
             cwd: dbg.cwd().display().to_string(),
             project: prepared.project.map(|k| format!("{k:?}")),
             program: prepared.program.map(|p| p.display().to_string()),
@@ -410,6 +432,9 @@ impl DdbgServer {
                 .collect(),
             notes: prepared.notes,
         };
+        if p.stop_on_entry {
+            info.notes.push("Entry-stop startup is asynchronous; call `wait` before inspecting frames or resuming.".into());
+        }
         let mut summary = info.notes.join("\n");
         if summary.is_empty() {
             summary = match &info.program {
@@ -422,6 +447,8 @@ impl DdbgServer {
             dbg,
             stdout_seen: 0,
             stderr_seen: 0,
+            stdout_plain: PlainOutput::default(),
+            stderr_plain: PlainOutput::default(),
         });
         ok(Some(summary), info)
     }
@@ -857,7 +884,9 @@ impl DdbgServer {
         }
     }
 
-    #[tool(description = "Debug a test and wait until it stops, exits or the timeout passes.")]
+    #[tool(
+        description = "Debug exactly one selected test and wait until it stops, exits or the timeout passes. Resume/wait results include a separate test_result from runner output; an adapter exit code of zero does not prove success."
+    )]
     async fn debug_test(&self, Parameters(p): Parameters<DebugTestParams>) -> ToolResult {
         self.resume(Resume::TestDebug(p.test, p.break_at_start), p.timeout_ms)
             .await
@@ -873,10 +902,13 @@ impl DdbgServer {
         st.stdout_seen += stdout.len();
         let stderr = st.dbg.stderr()[st.stderr_seen..].to_owned();
         st.stderr_seen += stderr.len();
-        ok(
-            None,
-            serde_json::json!({ "stdout": stdout, "stderr": stderr }),
-        )
+        let stdout = st.stdout_plain.push(&stdout);
+        let stderr = st.stderr_plain.push(&stderr);
+        let mut value = serde_json::json!({ "stdout": stdout, "stderr": stderr });
+        if let Some(result) = st.dbg.debug_test_result() {
+            value["test_result"] = to_value(DebugTestResultDto::from(result));
+        }
+        ok(None, value)
     }
 
     #[tool(

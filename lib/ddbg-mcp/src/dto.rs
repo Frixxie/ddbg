@@ -10,12 +10,51 @@ use ddbg_core::session::StopReason;
 use ddbg_core::thread::Thread;
 use ddbg_core::variable::{Evaluation, Variable};
 use ddbg_core::watch::Watch;
-use ddbg_driver::{Halt, TestCase};
+use ddbg_driver::{DebugTestResult, Halt, TestCase, TestOutcome};
 use schemars::JsonSchema;
 use serde::Serialize;
 
 fn path(p: &Path) -> String {
     p.display().to_string()
+}
+
+/// Runner evidence, not an interpretation of the debugger's exit code.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DebugTestResultDto {
+    pub test: String,
+    /// passed, failed, ignored, or unknown (including incomplete/missing output).
+    pub outcome: &'static str,
+    pub counts: Option<TestCountsDto>,
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TestCountsDto {
+    pub total: u32,
+    pub passed: u32,
+    pub failed: u32,
+    pub ignored: u32,
+}
+
+impl From<DebugTestResult> for DebugTestResultDto {
+    fn from(result: DebugTestResult) -> Self {
+        Self {
+            test: result.test,
+            outcome: match result.outcome {
+                Some(TestOutcome::Passed) => "passed",
+                Some(TestOutcome::Failed) => "failed",
+                Some(TestOutcome::Ignored) => "ignored",
+                None => "unknown",
+            },
+            counts: result.counts.map(|c| TestCountsDto {
+                total: c.total,
+                passed: c.passed,
+                failed: c.failed,
+                ignored: c.ignored,
+            }),
+            diagnostic: result.diagnostic,
+        }
+    }
 }
 
 /// State of the program after a resuming command.
@@ -326,6 +365,35 @@ mod tests {
     fn exited_halt() {
         let v = serde_json::to_value(HaltDto::from(Halt::Exited(3))).unwrap();
         assert_eq!(v, serde_json::json!({"state": "exited", "exit_code": 3}));
+    }
+
+    #[test]
+    fn test_results_report_failed_selection_and_unknown_without_changing_exit() {
+        let result = DebugTestResult {
+            test: "Ns.Tests.Selected".into(),
+            outcome: Some(TestOutcome::Failed),
+            counts: Some(ddbg_driver::TestCounts {
+                total: 0,
+                passed: 0,
+                failed: 0,
+                ignored: 0,
+            }),
+            diagnostic: Some("Zero tests ran".into()),
+        };
+        let mut value = serde_json::to_value(HaltDto::from(Halt::Exited(0))).unwrap();
+        value["test_result"] = serde_json::to_value(DebugTestResultDto::from(result)).unwrap();
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["test_result"]["outcome"], "failed");
+        assert_eq!(value["test_result"]["counts"]["total"], 0);
+        let result = DebugTestResult {
+            test: "Ns.Tests.Selected".into(),
+            outcome: None,
+            counts: None,
+            diagnostic: None,
+        };
+        let value = serde_json::to_value(DebugTestResultDto::from(result)).unwrap();
+        assert_eq!(value["outcome"], "unknown");
+        assert!(value["counts"].is_null());
     }
 
     #[test]

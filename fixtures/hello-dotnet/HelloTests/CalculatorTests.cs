@@ -32,4 +32,15 @@ public class CalculatorTests
     {
         Assert.Equal(expected, Calculator.Add(a, b));
     }
+
+    [Theory]
+    [InlineData("2023-09-25T14:30:00+02:00")]
+    [InlineData("a string with spaces")]
+    [InlineData("a \"quoted\" string")]
+    [InlineData(@"C:\some folder\file.txt")]
+    [InlineData("")]
+    public void StringRow(string input)
+    {
+        Assert.NotNull(input);
+    }
 }

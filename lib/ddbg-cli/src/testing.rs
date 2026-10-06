@@ -16,6 +16,8 @@ pub struct Tests {
     unavailable: String,
     /// Most recently displayed list; `test-run 2` indexes into it.
     listed: Vec<TestCase>,
+    /// Most recently selected debug test, retained across program restarts.
+    debugged: Option<TestCase>,
 }
 
 impl Tests {
@@ -29,6 +31,7 @@ impl Tests {
             provider,
             unavailable: unavailable.into(),
             listed: Vec::new(),
+            debugged: None,
         }
     }
 
@@ -59,12 +62,23 @@ impl Tests {
     pub async fn debug_target(
         &mut self,
         sel: &TestSelector,
-    ) -> anyhow::Result<(LaunchTarget, Location)> {
+    ) -> anyhow::Result<(LaunchTarget, Location, TestCase)> {
         let test = self.select(sel).await?;
         match self.provider()?.debug_target(&test.id).await? {
-            DebugTarget::Launch(t) => Ok((t, start_location(&test))),
+            DebugTarget::Launch(t) => {
+                let start = start_location(&test);
+                Ok((t, start, test))
+            }
             DebugTarget::Attach(_) => bail!("attach targets are not supported yet"),
         }
+    }
+
+    pub fn debugged(&self) -> Option<&TestCase> {
+        self.debugged.as_ref()
+    }
+
+    pub fn set_debugged(&mut self, test: Option<TestCase>) {
+        self.debugged = test;
     }
 
     async fn select(&mut self, sel: &TestSelector) -> anyhow::Result<TestCase> {

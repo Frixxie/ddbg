@@ -105,6 +105,34 @@ pub enum TestOutcome {
     Ignored,
 }
 
+/// Runner-reported execution counts. These do not depend on a process exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestCounts {
+    pub total: u32,
+    pub passed: u32,
+    pub failed: u32,
+    pub ignored: u32,
+}
+
+impl TestCounts {
+    pub fn valid(self) -> bool {
+        self.passed
+            .checked_add(self.failed)
+            .and_then(|n| n.checked_add(self.ignored))
+            == Some(self.total)
+    }
+
+    pub fn outcome(self) -> TestOutcome {
+        if self.total == 0 || self.failed > 0 {
+            TestOutcome::Failed
+        } else if self.ignored == self.total {
+            TestOutcome::Ignored
+        } else {
+            TestOutcome::Passed
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestResult {
     pub id: TestId,

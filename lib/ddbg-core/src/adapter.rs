@@ -191,12 +191,17 @@ impl DebugAdapter for NetCoreDbgAdapter {
     }
 
     fn build_launch_request(&self, t: &LaunchTarget) -> Result<Value> {
+        let args = t
+            .args
+            .iter()
+            .map(|arg| netcoredbg_argument(arg))
+            .collect::<Result<Vec<_>>>()?;
         Ok(json!({
             "name": "ddbg",
             "type": "coreclr",
             "request": "launch",
             "program": path_str(&t.absolute_program()),
-            "args": t.args,
+            "args": args,
             "cwd": path_str(&t.cwd),
             "env": t.env,
             "stopAtEntry": t.stop_on_entry,
@@ -211,6 +216,62 @@ impl DebugAdapter for NetCoreDbgAdapter {
             "processId": t.pid,
         }))
     }
+}
+
+/// netcoredbg (including 3.2.0) wraps each DAP argument in double quotes
+/// without escaping its contents before calling dbgshim.CreateProcessForLaunch.
+/// Encode literal quotes here, not in LaunchTarget: other adapters and direct
+/// process execution expect the original argv. Unix dbgshim removes only the
+/// backslash immediately before a quote; it does not use Windows argv rules.
+#[cfg(not(windows))]
+fn netcoredbg_argument(arg: &str) -> Result<String> {
+    if arg.ends_with('\\') && arg.chars().any(char::is_whitespace) {
+        return Err(anyhow!(
+            "netcoredbg cannot preserve an argument with whitespace and a trailing backslash: {arg:?}"
+        ));
+    }
+    // netcoredbg skips empty DAP arguments. A pair of syntactic quotes is
+    // nonempty to the adapter but becomes one empty argument in Unix dbgshim.
+    Ok(if arg.is_empty() {
+        "\"\"".into()
+    } else {
+        arg.replace('"', "\\\"")
+    })
+}
+
+#[cfg(windows)]
+fn netcoredbg_argument(arg: &str) -> Result<String> {
+    // Do not silently lose argv entries that netcoredbg cannot represent.
+    if arg.is_empty()
+        || (arg.ends_with('\\')
+            && !arg.contains(' ')
+            && (arg.contains('"') || arg.chars().any(char::is_whitespace)))
+    {
+        return Err(anyhow!("netcoredbg cannot preserve argument {arg:?}"));
+    }
+    let mut escaped = String::new();
+    let mut slashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            slashes += 1;
+            continue;
+        }
+        escaped.extend(std::iter::repeat_n(
+            '\\',
+            if c == '"' { slashes * 2 + 1 } else { slashes },
+        ));
+        escaped.push(c);
+        slashes = 0;
+    }
+    // netcoredbg adds one extra backslash itself when it quotes a trailing
+    // backslash argument containing spaces. Supply the remaining ones.
+    let trailing = if slashes > 0 && arg.contains(' ') {
+        slashes * 2 - 1
+    } else {
+        slashes
+    };
+    escaped.extend(std::iter::repeat_n('\\', trailing));
+    Ok(escaped)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +409,50 @@ mod tests {
         assert_eq!(v["type"], "coreclr");
         assert_eq!(v["env"], json!({"RUST_LOG": "debug"}));
         assert_eq!(v["stopAtEntry"], false);
+    }
+
+    #[test]
+    fn netcoredbg_preserves_literal_quotes_without_changing_other_adapters() {
+        let mut t = target();
+        t.args = vec![r#"Ns.C.M(input: "a \"quoted\" string", path: "C:\folder\file")"#.into()];
+        let net = NetCoreDbgAdapter::default()
+            .build_launch_request(&t)
+            .unwrap();
+        #[cfg(not(windows))]
+        assert_eq!(net["args"][0], t.args[0].replace('"', "\\\""));
+        #[cfg(windows)]
+        assert_eq!(net["args"][0], netcoredbg_argument(&t.args[0]).unwrap());
+        let lldb = LldbDapAdapter::default().build_launch_request(&t).unwrap();
+        assert_eq!(lldb["args"], json!(t.args));
+        let python = DebugpyAdapter::default().build_launch_request(&t).unwrap();
+        assert_eq!(python["args"], json!(t.args));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn netcoredbg_empty_and_backslash_arguments() {
+        assert_eq!(netcoredbg_argument("").unwrap(), "\"\"");
+        assert_eq!(netcoredbg_argument(r"C:\folder\").unwrap(), r"C:\folder\");
+        assert!(netcoredbg_argument("folder with spaces\\").is_err());
+        assert!(netcoredbg_argument("folder\twith tabs\\").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn netcoredbg_windows_escaping_matches_quoted_argv_rules() {
+        assert_eq!(netcoredbg_argument(r#"a\"b"#).unwrap(), r#"a\\\"b"#);
+        assert_eq!(netcoredbg_argument(r"C:\folder\").unwrap(), r"C:\folder\");
+        // netcoredbg adds the final escape backslash when it quotes this.
+        assert_eq!(
+            netcoredbg_argument(r"C:\some folder\").unwrap(),
+            r"C:\some folder\"
+        );
+        assert_eq!(
+            netcoredbg_argument(r"C:\some folder\\").unwrap(),
+            r"C:\some folder\\\"
+        );
+        assert!(netcoredbg_argument("").is_err());
+        assert!(netcoredbg_argument("folder\twith tabs\\").is_err());
     }
 
     #[test]

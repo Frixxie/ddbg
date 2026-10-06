@@ -6,6 +6,7 @@ pub mod commands;
 pub mod functions;
 mod highlight;
 mod logging;
+pub mod output;
 pub mod parser;
 pub mod render;
 mod repl;
@@ -25,6 +26,18 @@ use ddbg_test::{AnyProvider, DotNetTestProvider, RustTestProvider};
 
 pub use args::{Args, Subcommand};
 pub use session::{Outcome, Session, TestCase};
+
+/// Build metadata (not a cryptographic executable fingerprint).
+pub const BUILD_REVISION: &str = env!("DDBG_BUILD_REVISION");
+pub const BUILD_TIMESTAMP: &str = env!("DDBG_BUILD_TIMESTAMP");
+pub const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DDBG_BUILD_REVISION"),
+    "; built ",
+    env!("DDBG_BUILD_TIMESTAMP"),
+    ")"
+);
 
 /// Everything a frontend needs to start: a running engine and setup.
 pub struct Prepared {

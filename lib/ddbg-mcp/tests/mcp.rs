@@ -96,6 +96,88 @@ async fn tools_require_a_session() {
 }
 
 #[tokio::test]
+async fn session_reports_build_identity_and_async_entry_stop_guidance() {
+    let client = connect().await;
+    let info = call(&client, "start_session", json!({"no_detect": true})).await;
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert!(!info["build_revision"].as_str().unwrap().is_empty());
+    assert!(
+        info["build_timestamp"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
+    let tools = client.list_all_tools().await.unwrap();
+    let start = tools
+        .iter()
+        .find(|tool| tool.name == "start_session")
+        .unwrap();
+    assert!(start.description.as_ref().unwrap().contains("asynchronous"));
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires .NET SDK 10 and netcoredbg"]
+async fn dotnet_string_row_and_runner_results_are_separate_from_exit_codes() {
+    let client = connect().await;
+    call(
+        &client,
+        "start_session",
+        json!({
+            "cwd": fixture("hello-dotnet"), "adapter": "netcoredbg --interpreter=vscode"
+        }),
+    )
+    .await;
+    let tests = call(&client, "list_tests", json!({"filter": "StringRow"})).await;
+    assert_eq!(tests["tests"].as_array().unwrap().len(), 5);
+    let stopped = call(
+        &client,
+        "debug_test",
+        json!({
+            "test": "1", "break_at_start": true, "timeout_ms": 30000
+        }),
+    )
+    .await;
+    assert_eq!(stopped["state"], "stopped");
+    assert_eq!(stopped["test_result"]["outcome"], "unknown");
+    let exited = call(&client, "continue", json!({"timeout_ms": 30000})).await;
+    assert_eq!(exited["state"], "exited");
+    assert!(exited["exit_code"].is_number());
+    assert_eq!(exited["test_result"]["outcome"], "passed");
+    assert_eq!(exited["test_result"]["counts"]["total"], 1);
+    let output = call(&client, "get_output", json!({})).await;
+    assert!(!output["stdout"].as_str().unwrap().contains('\u{1b}'));
+    assert_eq!(output["test_result"], exited["test_result"]);
+    let output = call(&client, "get_output", json!({})).await;
+    assert_eq!(output["stdout"], "");
+    assert_eq!(output["test_result"], exited["test_result"]);
+    let waited = call(&client, "wait", json!({"timeout_ms": 0})).await;
+    assert_eq!(waited["test_result"], exited["test_result"]);
+
+    call(
+        &client,
+        "list_tests",
+        json!({"filter": "CalculatorTests.Fails"}),
+    )
+    .await;
+    let exited = call(
+        &client,
+        "debug_test",
+        json!({
+            "test": "1", "timeout_ms": 30000
+        }),
+    )
+    .await;
+    assert_eq!(exited["state"], "exited");
+    assert_eq!(exited["test_result"]["outcome"], "failed");
+    assert_eq!(exited["test_result"]["counts"]["failed"], 1);
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn attach_validates_pid_and_detach_requires_an_active_process() {
     let client = connect().await;
     call(&client, "start_session", json!({"no_detect": true})).await;

@@ -476,21 +476,25 @@ pub fn parse_list(stdout: &str) -> (Framework, Vec<String>) {
 
 /// Outcome from the `Test run summary` block.
 pub fn parse_summary(stdout: &str) -> Option<TestOutcome> {
-    let summary = &stdout[stdout.find("Test run summary")?..];
+    parse_counts(stdout).map(|counts| counts.outcome())
+}
+
+/// Counts from the final MTP runner summary, independent of adapter exit codes.
+pub fn parse_counts(stdout: &str) -> Option<crate::TestCounts> {
+    let summary = &stdout[stdout.rfind("Test run summary")?..];
     let count = |key: &str| -> Option<u32> {
         summary
             .lines()
             .find_map(|l| l.trim().strip_prefix(key))
             .and_then(|v| v.trim().parse().ok())
     };
-    let total = count("total:")?;
-    Some(if total == 0 || count("failed:").unwrap_or(0) > 0 {
-        TestOutcome::Failed
-    } else if count("skipped:").unwrap_or(0) == total {
-        TestOutcome::Ignored
-    } else {
-        TestOutcome::Passed
-    })
+    let counts = crate::TestCounts {
+        total: count("total:")?,
+        failed: count("failed:")?,
+        passed: count("succeeded:")?,
+        ignored: count("skipped:")?,
+    };
+    counts.valid().then_some(counts)
 }
 
 #[cfg(test)]
@@ -590,7 +594,8 @@ Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
     fn parses_summaries() {
         let s = |total, failed, skipped| {
             format!(
-                "Test run summary: x\n  total: {total}\n  failed: {failed}\n  succeeded: 0\n  skipped: {skipped}\n"
+                "Test run summary: x\n  total: {total}\n  failed: {failed}\n  succeeded: {}\n  skipped: {skipped}\n",
+                total - failed - skipped
             )
         };
         assert_eq!(parse_summary(&s(1, 0, 0)), Some(TestOutcome::Passed));
@@ -598,6 +603,13 @@ Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
         assert_eq!(parse_summary(&s(1, 0, 1)), Some(TestOutcome::Ignored));
         assert_eq!(parse_summary(&s(0, 0, 0)), Some(TestOutcome::Failed));
         assert_eq!(parse_summary("crashed"), None);
+        assert_eq!(parse_summary("Test run summary\n  total: 1\n"), None);
+        assert_eq!(
+            parse_summary(
+                "Test run summary\n  total: 1\n  failed: 0\n  succeeded: 0\n  skipped: 0\n"
+            ),
+            None
+        );
     }
 
     #[test]

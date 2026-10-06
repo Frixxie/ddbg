@@ -58,7 +58,7 @@ impl Session {
             } => {
                 progress("building tests...");
                 // Test targets are complete; no program resolution needed.
-                let (target, start) = match self.tests.debug_target(test).await {
+                let (target, start, selected) = match self.tests.debug_target(test).await {
                     Ok(t) => t,
                     Err(e) => return Outcome::Error(format!("{e:#}")),
                 };
@@ -68,7 +68,11 @@ impl Session {
                         return Outcome::Error(format!("breakpoint at test start: {e:#}"));
                     }
                 }
-                return self.engine_execute(Command::Run(Some(target))).await;
+                let outcome = self.engine_execute(Command::Run(Some(target))).await;
+                if matches!(outcome, Outcome::Reply(_, _)) {
+                    self.tests.set_debugged(Some(selected));
+                }
+                return outcome;
             }
             _ => None,
         };
@@ -85,7 +89,12 @@ impl Session {
             }
             crate::apply_dotnet_launch(t);
         }
-        self.engine_execute(cmd).await
+        let clear_debugged = matches!(cmd, Command::Run(Some(_)) | Command::Attach(_));
+        let outcome = self.engine_execute(cmd).await;
+        if clear_debugged && matches!(outcome, Outcome::Reply(_, _)) {
+            self.tests.set_debugged(None);
+        }
+        outcome
     }
 
     async fn engine_execute(&self, cmd: Command) -> Outcome {

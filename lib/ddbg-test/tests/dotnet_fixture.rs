@@ -32,7 +32,7 @@ async fn discover_run_and_debug_target() {
         "{names:?}"
     );
     assert!(names.contains(&"HelloTests.CalculatorTests.Fails"));
-    assert_eq!(all.len(), 4);
+    assert_eq!(all.len(), 9);
 
     let adds = all.iter().find(|t| t.display_name == "Adds").unwrap();
     let fails = all.iter().find(|t| t.display_name == "Fails").unwrap();
@@ -50,7 +50,10 @@ async fn discover_run_and_debug_target() {
         ["--filter-display-name", "HelloTests.CalculatorTests.Adds"]
     );
 
-    for row in all.iter().filter(|t| t.name.contains("AddsMany(")) {
+    for row in all
+        .iter()
+        .filter(|t| t.name.contains("AddsMany(") || t.name.contains("StringRow("))
+    {
         let run = p.run(std::slice::from_ref(&row.id)).await.unwrap();
         assert_eq!(run.results[0].outcome, TestOutcome::Passed);
         assert!(

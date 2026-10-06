@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use ddbg_cli::output::plain_text;
 use ddbg_cli::parser::{Input, parse};
 use ddbg_cli::render::{Renderer, help};
 use ddbg_cli::testing::{Tests, render_list};
@@ -48,6 +49,58 @@ use tokio::sync::broadcast::{self, error::RecvError, error::TryRecvError};
 
 pub use ddbg_cli::TestCase;
 pub use ddbg_core::session::StopReason;
+pub use ddbg_test::{TestCounts, TestOutcome};
+
+/// Runner evidence for the most recent debug-test launch. `outcome: None`
+/// means unknown (still running, interrupted, or no complete summary), never
+/// success inferred from an adapter exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugTestResult {
+    pub test: String,
+    pub outcome: Option<TestOutcome>,
+    pub counts: Option<TestCounts>,
+    pub diagnostic: Option<String>,
+}
+
+struct DebugTestRun {
+    test: TestCase,
+    stdout: String,
+    finished: bool,
+    exited: bool,
+}
+
+impl DebugTestRun {
+    fn result(&self) -> DebugTestResult {
+        let counts = if self.finished && self.exited {
+            let output = plain_text(&self.stdout);
+            match self.test.id.provider {
+                ddbg_test::ProviderId::DotNet => ddbg_test::dotnet::parse_counts(&output),
+                ddbg_test::ProviderId::Rust => ddbg_test::rust::parse_counts(&output),
+            }
+        } else {
+            None
+        };
+        let (outcome, diagnostic) = match counts {
+            Some(c) if c.total != 1 => (Some(TestOutcome::Failed), Some(format!(
+                "Expected exactly one selected test to run, but the runner reported {} tests.", c.total
+            ))),
+            Some(c) => (Some(c.outcome()), None),
+            None if self.finished && !self.exited => (None, Some(
+                "Debug-test execution was interrupted; the test outcome is unknown.".into()
+            )),
+            None if self.finished => (None, Some(
+                "No complete test runner summary was received; the test outcome is unknown. An adapter exit code of zero is not proof of success.".into()
+            )),
+            None => (None, None),
+        };
+        DebugTestResult {
+            test: self.test.name.clone(),
+            outcome,
+            counts,
+            diagnostic,
+        }
+    }
+}
 
 /// Default time to wait for the program to stop, exit or terminate.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -106,6 +159,7 @@ pub struct Debugger {
     stdout: String,
     stderr: String,
     timeout: Duration,
+    debug_test: Option<DebugTestRun>,
 }
 
 impl Debugger {
@@ -154,6 +208,7 @@ impl Debugger {
             stdout: String::new(),
             stderr: String::new(),
             timeout: DEFAULT_TIMEOUT,
+            debug_test: None,
         }
     }
 
@@ -213,6 +268,10 @@ impl Debugger {
         if resumes {
             self.drain();
         }
+        let launches = matches!(
+            cmd,
+            Command::Run(_) | Command::Attach(_) | Command::TestDebug { .. }
+        );
         let mut text = match self.session.execute(cmd, &mut |_| {}).await {
             Outcome::Reply(cmd, reply) => self.renderer.reply(&cmd, &reply),
             Outcome::Tests(tests) => Some(render_list(&tests)),
@@ -220,6 +279,9 @@ impl Debugger {
             Outcome::Error(e) => bail!(e),
             Outcome::Quit => None,
         };
+        if launches {
+            self.track_debug_test();
+        }
         if resumes {
             self.wait().await?;
         } else {
@@ -260,8 +322,20 @@ impl Debugger {
     /// Send a command to the engine and return its raw reply. Does not wait
     /// for the program to halt; see [`Debugger::wait`].
     pub async fn execute(&mut self, cmd: Command) -> Result<Reply> {
+        let launches = matches!(
+            cmd,
+            Command::Run(_) | Command::Attach(_) | Command::TestDebug { .. }
+        );
+        if launches {
+            self.drain();
+        }
         match self.session.execute(cmd, &mut |_| {}).await {
-            Outcome::Reply(_, reply) => Ok(reply),
+            Outcome::Reply(_, reply) => {
+                if launches {
+                    self.track_debug_test();
+                }
+                Ok(reply)
+            }
             Outcome::Quit => Ok(Reply::Quit),
             Outcome::Error(e) => Err(anyhow!(e)),
             other => bail!("unexpected outcome {other:?}"),
@@ -573,9 +647,7 @@ impl Debugger {
             test: selector(test),
             break_at_start,
         };
-        if let Outcome::Error(e) = self.session.execute(cmd, &mut |_| {}).await {
-            bail!(e);
-        }
+        self.execute(cmd).await?;
         self.wait().await
     }
 
@@ -650,7 +722,12 @@ impl Debugger {
     fn record(&mut self, ev: &DebugEvent) {
         if let DebugEvent::Output(o) = ev {
             match o.category {
-                OutputCategory::Stdout => self.stdout.push_str(&o.text),
+                OutputCategory::Stdout => {
+                    self.stdout.push_str(&o.text);
+                    if let Some(run) = &mut self.debug_test {
+                        run.stdout.push_str(&o.text);
+                    }
+                }
                 OutputCategory::Stderr => self.stderr.push_str(&o.text),
                 _ => {}
             }
@@ -658,6 +735,49 @@ impl Debugger {
         if let Some(text) = self.renderer.event(ev) {
             self.pending.push(text);
         }
+        if let Some(run) = &mut self.debug_test {
+            match ev {
+                DebugEvent::SessionStarted => {
+                    run.stdout.clear();
+                    run.finished = false;
+                    run.exited = false;
+                }
+                DebugEvent::SessionExited(_) | DebugEvent::SessionTerminated => {
+                    let was_finished = run.finished;
+                    run.finished = true;
+                    // A normal DAP exit is often followed by `terminated`.
+                    // Do not turn that completed run into an interrupted one.
+                    if matches!(ev, DebugEvent::SessionExited(_)) {
+                        run.exited = true;
+                    }
+                    if !was_finished && let Some(diagnostic) = run.result().diagnostic {
+                        self.pending.push(format!("Test result: {diagnostic}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn track_debug_test(&mut self) {
+        self.debug_test = self
+            .session
+            .tests
+            .debugged()
+            .cloned()
+            .map(|test| DebugTestRun {
+                test,
+                stdout: String::new(),
+                finished: false,
+                exited: false,
+            });
+    }
+
+    /// Test runner outcome/counts, independent of the adapter-reported exit.
+    /// Output consumption does not discard this evidence. New launches reset it.
+    pub fn debug_test_result(&mut self) -> Option<DebugTestResult> {
+        self.drain();
+        self.debug_test.as_ref().map(DebugTestRun::result)
     }
 
     fn take_pending(&mut self) -> String {

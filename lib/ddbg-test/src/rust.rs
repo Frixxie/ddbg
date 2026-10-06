@@ -289,6 +289,32 @@ pub fn parse_run(stdout: &str) -> HashMap<&str, TestOutcome> {
         .collect()
 }
 
+/// Counts from the final libtest summary, including a zero-test run.
+pub fn parse_counts(stdout: &str) -> Option<crate::TestCounts> {
+    let summary = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("test result:"))?;
+    let count = |label: &str| -> Option<u32> {
+        summary.split(';').find_map(|part| {
+            let part = part.trim();
+            let part = part.strip_suffix(label)?.trim_end();
+            part.rsplit_once(' ').map_or(part, |(_, n)| n).parse().ok()
+        })
+    };
+    let counts = crate::TestCounts {
+        passed: count("passed")?,
+        failed: count("failed")?,
+        ignored: count("ignored")?,
+        total: 0,
+    };
+    let total = counts
+        .passed
+        .checked_add(counts.failed)?
+        .checked_add(counts.ignored)?;
+    Some(crate::TestCounts { total, ..counts })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +402,28 @@ mod tests {
         assert_eq!(r["a::two"], TestOutcome::Failed);
         assert_eq!(r["a::three"], TestOutcome::Ignored);
         assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn parses_complete_runner_counts_including_zero_tests() {
+        let summary = |passed, failed, ignored| {
+            format!(
+                "test result: ok. {passed} passed; {failed} failed; {ignored} ignored; 0 measured; 2 filtered out; finished in 0.00s\n"
+            )
+        };
+        let counts = parse_counts(&summary(1, 0, 0)).unwrap();
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.outcome(), TestOutcome::Passed);
+        assert_eq!(
+            parse_counts(&summary(0, 1, 0)).unwrap().outcome(),
+            TestOutcome::Failed
+        );
+        assert_eq!(
+            parse_counts(&summary(0, 0, 1)).unwrap().outcome(),
+            TestOutcome::Ignored
+        );
+        assert_eq!(parse_counts(&summary(0, 0, 0)).unwrap().total, 0);
+        assert_eq!(parse_counts("test result: ok. 1 passed;"), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use clap::Parser;
 /// A terminal-first, language-agnostic debugger with first-class test
 /// debugging, built on DAP.
 #[derive(Debug, Parser)]
-#[command(name = "ddbg", version, args_conflicts_with_subcommands = true)]
+#[command(name = "ddbg", version = crate::BUILD_VERSION, args_conflicts_with_subcommands = true)]
 pub struct Args {
     /// Debug adapter command (default by language: lldb-dap for Rust/C/C++,
     /// netcoredbg for .NET, `python3 -m debugpy.adapter` for Python).

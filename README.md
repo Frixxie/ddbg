@@ -306,10 +306,33 @@ arguments, rather than running all of the method's rows. Display names must be
 unique; names beginning or ending in `*` are rejected to avoid wildcard selection. Other
 MTP frameworks are listed but cannot be run or debugged individually yet.
 
+netcoredbg launch arguments are encoded separately to preserve literal quotes
+in string-valued theory rows. Unsupported argument forms fail explicitly rather
+than being silently dropped: whitespace plus a trailing backslash on Unix,
+and empty arguments or certain unquoted trailing-backslash forms on Windows.
+
+The driver exposes `debug_test_result()` and MCP resume/wait/output responses
+include `test_result` for a debug-test launch. This reports runner-derived
+`outcome` and execution `counts` separately from the adapter's `exit_code`.
+Zero tests or more than one selected test are reported as failed selection;
+missing/incomplete summaries and interrupted tests are `unknown`, not passed.
+Results survive output reads and reset on a new launch. Manual `run`/`attach`
+operations do not inherit a prior debug-test result. MCP output strips ANSI
+terminal formatting; raw driver output is preserved.
+
 Debugger exit codes are reported by the adapter, not independently verified by
 ddbg. Some netcoredbg/runtime combinations have reported zero for a non-zero
 .NET process exit. Use the ordinary test runner to verify pass/fail results;
 a debugger-reported zero alone is not proof of success.
+
+MCP `start_session(stop_on_entry: true)` queues startup asynchronously. Call
+`wait` to observe the entry stop before inspecting frames or resuming.
+
+`ddbg --version` includes the source revision and build timestamp; MCP
+`start_session` returns these as `build_revision` and `build_timestamp` alongside
+`version`. These identify a build, not a cryptographic binary fingerprint.
+Source archives can set `DDBG_BUILD_REVISION` at build time;
+`SOURCE_DATE_EPOCH` supplies the timestamp for reproducible builds.
 
 ## Terminal UI
 

@@ -11,6 +11,7 @@ readme = "../../README.md"
 [dependencies]
 ddbg-core.workspace = true
 ddbg-cli.workspace = true
+ddbg-test.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 

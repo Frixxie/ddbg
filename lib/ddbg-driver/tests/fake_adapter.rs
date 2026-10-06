@@ -13,6 +13,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
+    fake_with_output(&mut io, exit_on_continue, "done\n").await;
+}
+
+async fn fake_with_output(io: &mut DuplexStream, exit_on_continue: bool, output: &str) {
     let mut decoder = Decoder::new();
     let mut buf = vec![0u8; 16 * 1024];
     let mut seq = 0;
@@ -60,7 +64,7 @@ async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
             message: None,
             body: Some(body),
         };
-        send(&mut io, Message::Response(resp)).await;
+        send(io, Message::Response(resp)).await;
         let events: &[(&str, Value)] = match req.command.as_str() {
             "launch" | "attach" => &[("initialized", json!({}))],
             "configurationDone" => &[(
@@ -69,7 +73,7 @@ async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
             )],
             "next" => &[("stopped", json!({"reason": "step", "threadId": 1}))],
             "continue" if exit_on_continue => &[
-                ("output", json!({"category": "stdout", "output": "done\n"})),
+                ("output", json!({"category": "stdout", "output": output})),
                 ("exited", json!({"exitCode": 0})),
                 ("terminated", json!({})),
             ],
@@ -82,7 +86,7 @@ async fn fake(mut io: DuplexStream, exit_on_continue: bool) {
                 event: (*name).into(),
                 body: Some(body.clone()),
             };
-            send(&mut io, Message::Event(ev)).await;
+            send(io, Message::Event(ev)).await;
         }
     }
 }
@@ -112,6 +116,106 @@ fn debugger_with_exit(exit_on_continue: bool) -> Debugger {
         }),
     );
     Debugger::from_engine(engine, "/")
+}
+
+fn debugger_with_test_output(output: &'static str) -> Debugger {
+    let engine = spawn_with_connector(
+        EngineConfig {
+            adapter: Arc::new(LldbDapAdapter::default()),
+            cwd: "/".into(),
+            target: Some(LaunchTarget::new("/bin/test-app", vec![])),
+        },
+        Box::new(move |_| {
+            let (a, mut b) = tokio::io::duplex(64 * 1024);
+            let (r, w) = tokio::io::split(a);
+            let (client, incoming) = DapClient::connect(r, w);
+            tokio::spawn(async move { fake_with_output(&mut b, true, output).await });
+            Ok(Connection {
+                client,
+                incoming,
+                child: None,
+            })
+        }),
+    );
+    let mut tests = ddbg_cli::testing::Tests::new(None, "fake test provider");
+    tests.set_debugged(Some(ddbg_test::TestCase {
+        id: ddbg_test::TestId {
+            provider: ddbg_test::ProviderId::DotNet,
+            name: "Ns.Tests.Selected".into(),
+            data: ddbg_test::ProviderData::DotNet {
+                assembly: "/bin/test-app".into(),
+                project: "/test.csproj".into(),
+                framework: ddbg_test::dotnet::Framework::XUnitV3,
+            },
+        },
+        name: "Ns.Tests.Selected".into(),
+        display_name: "Selected".into(),
+        source: None,
+        line: None,
+        suite: None,
+    }));
+    Debugger::from_session(ddbg_cli::Session {
+        engine,
+        cwd: "/".into(),
+        candidates: vec![],
+        tests,
+    })
+}
+
+#[tokio::test]
+async fn debug_test_outcome_uses_runner_counts_not_zero_adapter_exit() {
+    use ddbg_driver::TestOutcome;
+    for (output, outcome, total) in [
+        (
+            "\x1b[32mTest run summary: Passed\x1b[0m\n  total: 1\n  failed: 0\n  succeeded: 1\n  skipped: 0\n",
+            Some(TestOutcome::Passed),
+            Some(1),
+        ),
+        (
+            "Test run summary: Failed\n  total: 1\n  failed: 1\n  succeeded: 0\n  skipped: 0\n",
+            Some(TestOutcome::Failed),
+            Some(1),
+        ),
+        (
+            "Test run summary: Zero tests ran\n  total: 0\n  failed: 0\n  succeeded: 0\n  skipped: 0\n",
+            Some(TestOutcome::Failed),
+            Some(0),
+        ),
+        (
+            "Test run summary: Passed\n  total: 2\n  failed: 0\n  succeeded: 2\n  skipped: 0\n",
+            Some(TestOutcome::Failed),
+            Some(2),
+        ),
+        (
+            "Test run summary: Skipped\n  total: 1\n  failed: 0\n  succeeded: 0\n  skipped: 1\n",
+            Some(TestOutcome::Ignored),
+            Some(1),
+        ),
+        ("Test run summary: incomplete\n  total: 1\n", None, None),
+        ("No summary\n", None, None),
+    ] {
+        let mut dbg = debugger_with_test_output(output);
+        dbg.run().await.unwrap().into_stopped().unwrap();
+        assert_eq!(dbg.debug_test_result().unwrap().outcome, None);
+        assert_eq!(dbg.cont().await.unwrap(), Halt::Exited(0));
+        let result = dbg.debug_test_result().unwrap();
+        assert_eq!(result.outcome, outcome, "{output}");
+        assert_eq!(result.counts.map(|c| c.total), total, "{output}");
+        if total != Some(1) {
+            assert!(result.diagnostic.is_some(), "{result:?}");
+        }
+        // Output reads and a retained exit must not discard or duplicate the result.
+        dbg.stdout();
+        dbg.take_transcript();
+        assert_eq!(dbg.wait().await.unwrap(), Halt::Exited(0));
+        assert_eq!(dbg.debug_test_result(), Some(result));
+        dbg.run().await.unwrap().into_stopped().unwrap();
+        assert_eq!(dbg.debug_test_result().unwrap().counts, None);
+        dbg.kill().await.unwrap();
+        dbg.wait().await.unwrap();
+        assert_eq!(dbg.debug_test_result().unwrap().outcome, None);
+        dbg.quit().await.unwrap();
+    }
 }
 
 #[tokio::test]

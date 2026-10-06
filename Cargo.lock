@@ -502,6 +502,7 @@ dependencies = [
  "ddbg-cli",
  "ddbg-core",
  "ddbg-dap",
+ "ddbg-test",
  "serde_json",
  "tokio",
 ]
