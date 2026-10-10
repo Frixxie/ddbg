@@ -5,7 +5,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use serde_json::Value;
@@ -86,14 +86,20 @@ impl DapClient {
     pub fn send_raw(&self, command: &str, arguments: Option<Value>) -> Result<RawResponseFuture> {
         let seq = self.next_seq();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(seq, tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(seq, tx);
         let msg = Message::Request(Request {
             seq,
             command: command.into(),
             arguments,
         });
         if self.out_tx.send(msg).is_err() {
-            self.pending.lock().unwrap().remove(&seq);
+            self.pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&seq);
             return Err(channel_closed());
         }
         Ok(RawResponseFuture { rx })
@@ -228,7 +234,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
         }
     }
     // Fail every outstanding request.
-    pending.lock().unwrap().clear();
+    pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
 }
 
 fn dispatch(msg: Message, pending: &Pending, in_tx: &mpsc::UnboundedSender<Incoming>) {
@@ -237,7 +246,10 @@ fn dispatch(msg: Message, pending: &Pending, in_tx: &mpsc::UnboundedSender<Incom
     }
     match msg {
         Message::Response(resp) => {
-            let tx = pending.lock().unwrap().remove(&resp.request_seq);
+            let tx = pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&resp.request_seq);
             match tx {
                 Some(tx) => {
                     let _ = tx.send(resp);

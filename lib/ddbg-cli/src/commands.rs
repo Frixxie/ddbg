@@ -1,7 +1,7 @@
 //! Tab completion for the REPL.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use ddbg_core::{EngineHandle, Reply, command::Command};
@@ -91,7 +91,12 @@ impl DdbgCompleter {
                         }
                     }
                 }
-                for name in self.tests.lock().unwrap().iter() {
+                for name in self
+                    .tests
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                {
                     candidates.push(candidate(name.clone(), "Test".into(), span));
                 }
             }
@@ -410,7 +415,10 @@ mod tests {
         let found = c.suggestions(line, line.len());
         assert_eq!(found[0].value, "a test with spaces");
         assert_eq!(found[0].span.start, 3);
-        c.tests.lock().unwrap().clear();
+        c.tests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         assert!(c.suggestions("tr par", 6).is_empty());
     }
 

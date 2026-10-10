@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ddbg_core::command::Command;
 use reedline::{
@@ -101,7 +101,10 @@ pub async fn run(session: Session, initial: Vec<Command>, verbose: bool) -> anyh
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    let text = event_renderer.lock().unwrap().event(&event);
+                    let text = event_renderer
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .event(&event);
                     if let Some(text) = text {
                         let _ = event_out.send(text);
                     }
@@ -230,7 +233,10 @@ impl Repl {
             let _ = out.send(s.to_owned());
         };
         let outcome = self.session.execute(cmd, &mut progress).await;
-        *self.completion_tests.lock().unwrap() = self
+        *self
+            .completion_tests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = self
             .session
             .tests
             .listed()
@@ -240,7 +246,12 @@ impl Repl {
         match outcome {
             Outcome::Quit => return true,
             Outcome::Reply(cmd, reply) => {
-                if let Some(text) = self.renderer.lock().unwrap().reply(&cmd, &reply) {
+                if let Some(text) = self
+                    .renderer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .reply(&cmd, &reply)
+                {
                     self.print(text);
                 }
             }

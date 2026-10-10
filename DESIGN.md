@@ -1,5 +1,9 @@
 # ddbg — Terminal-first DAP debugger
 
+> **Note:** This is a design draft, not a description of current behavior.
+> It includes unimplemented proposals (for example `.ddbg.toml` configuration)
+> and outdated milestones. See `README.md` and the code for what ddbg does today.
+
 **Status:** Draft  
 **Target:** v0.1  
 **Implementation language:** Rust  

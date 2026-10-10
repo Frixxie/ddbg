@@ -387,7 +387,7 @@ impl Engine {
                     self.evaluate_watch(id).await;
                 }
                 Ok(Reply::WatchSet {
-                    watch: self.session.watches.get(id).unwrap().clone(),
+                    watch: self.watch(id)?.clone(),
                     new,
                 })
             }
@@ -416,6 +416,20 @@ impl Engine {
                 Ok(Reply::Quit)
             }
         }
+    }
+
+    fn breakpoint(&self, id: BreakpointId) -> Result<&Breakpoint> {
+        self.session
+            .breakpoints
+            .get(id)
+            .ok_or_else(|| anyhow!("no breakpoint {id}"))
+    }
+
+    fn watch(&self, id: WatchId) -> Result<&crate::watch::Watch> {
+        self.session
+            .watches
+            .get(id)
+            .ok_or_else(|| anyhow!("no watch {id}"))
     }
 
     fn require_stopped(&self) -> Result<ThreadId> {
@@ -460,7 +474,7 @@ impl Engine {
         let before = self.session.breakpoints.clone();
         let (id, new) = self.session.breakpoints.add(location, &self.cwd);
         if !new && let Some(condition) = &condition {
-            let bp = self.session.breakpoints.get(id).unwrap();
+            let bp = self.breakpoint(id)?;
             if bp.condition.as_ref() != Some(condition) {
                 bail!(
                     "breakpoint {id} already exists; use `condition {id} <expression>` to change it"
@@ -470,14 +484,14 @@ impl Engine {
         if new {
             self.session.breakpoints.set_condition(id, condition);
             if self.can_set_breakpoints() {
-                let bp = self.session.breakpoints.get(id).unwrap().clone();
+                let bp = self.breakpoint(id)?.clone();
                 if let Err(e) = self.sync_for(&bp).await {
                     self.session.breakpoints = before;
                     return Err(e);
                 }
             }
         }
-        let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
+        let breakpoint = self.breakpoint(id)?.clone();
         Ok(Reply::BreakpointSet { breakpoint, new })
     }
 
@@ -503,7 +517,7 @@ impl Engine {
                 return Err(e);
             }
         }
-        let breakpoint = self.session.breakpoints.get(id).unwrap().clone();
+        let breakpoint = self.breakpoint(id)?.clone();
         Ok(Reply::BreakpointSet {
             breakpoint,
             new: false,
@@ -1080,7 +1094,9 @@ impl Engine {
     /// Evaluate only the summary, without expanding children or invoking
     /// ToString(). Each failure belongs to its watch, not to the debugger stop.
     async fn evaluate_watch(&mut self, id: WatchId) {
-        let expression = self.session.watches.get(id).unwrap().expression.clone();
+        let Some(expression) = self.session.watches.get(id).map(|w| w.expression.clone()) else {
+            return;
+        };
         let result = match self.session.current_frame().map(|f| f.id.0) {
             Some(frame_id) => match self.client() {
                 Ok(client) => client
@@ -1266,11 +1282,15 @@ impl Engine {
                     .id
                     .and_then(|id| self.session.breakpoints.by_adapter_id(id))
                     .cloned();
-                if let Some(id) = self.session.breakpoints.apply_event(&b.breakpoint) {
-                    let bp = self.session.breakpoints.get(id).unwrap().clone();
-                    if before.as_ref() != Some(&bp) {
-                        self.emit(DebugEvent::BreakpointChanged(bp));
-                    }
+                if let Some(bp) = self
+                    .session
+                    .breakpoints
+                    .apply_event(&b.breakpoint)
+                    .and_then(|id| self.session.breakpoints.get(id))
+                    .cloned()
+                    && before.as_ref() != Some(&bp)
+                {
+                    self.emit(DebugEvent::BreakpointChanged(bp));
                 }
             }
             DapEvent::Initialized => {}

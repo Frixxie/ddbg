@@ -8,7 +8,7 @@
 mod dto;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use ddbg_cli::output::{PlainOutput, plain_text};
@@ -284,7 +284,10 @@ enum Resume {
 
 impl DdbgServer {
     fn engine(&self) -> Option<EngineHandle> {
-        self.engine.lock().unwrap().clone()
+        self.engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Run a resuming command and report how the program halted.
@@ -387,7 +390,12 @@ impl DdbgServer {
         asynchronous: call `wait` to observe the stop before inspecting frames or resuming."
     )]
     async fn start_session(&self, Parameters(mut p): Parameters<StartSessionParams>) -> ToolResult {
-        if let Some(engine) = self.engine.lock().unwrap().take() {
+        if let Some(engine) = self
+            .engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
             // Unblocks a resuming command that may hold the session.
             tokio::spawn(async move { engine.execute(Command::Quit).await });
         }
@@ -460,7 +468,7 @@ impl DdbgServer {
                 None => "No program selected; pass one to `run`".into(),
             };
         }
-        *self.engine.lock().unwrap() = Some(dbg.engine().clone());
+        *self.engine.lock().unwrap_or_else(PoisonError::into_inner) = Some(dbg.engine().clone());
         *guard = Some(State {
             dbg,
             stdout_seen: 0,
@@ -474,7 +482,11 @@ impl DdbgServer {
 
     #[tool(description = "End the debug session and shut down the debug adapter.")]
     async fn end_session(&self) -> ToolResult {
-        let engine = self.engine.lock().unwrap().take();
+        let engine = self
+            .engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Ok(mut guard) = self.state.try_lock() {
             return match guard.take() {
                 Some(st) => match st.dbg.quit().await {
