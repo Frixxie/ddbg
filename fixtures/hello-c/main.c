@@ -13,7 +13,7 @@ int add(int a, int b) {
 int main(void) {
     struct point point = {3, 4};
     const char *greeting = "hello";
-    int total = add(point.x, point.y); // line 16
+    int total = add(point.x, point.y); // ddbg:call-add
     printf("%s: %d\n", greeting, total);
     return 0;
 }

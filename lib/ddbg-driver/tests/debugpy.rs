@@ -1,6 +1,9 @@
 //! Real pytest debugging through debugpy. Uses `$DDBG_PYTHON` (default
 //! `python3`) and skips when it cannot import both `debugpy` and `pytest`.
 
+mod common;
+
+use common::line_of;
 use std::path::PathBuf;
 
 use ddbg_driver::{Debugger, TestOutcome};
@@ -69,7 +72,10 @@ async fn debug_failing_test(mut dbg: Debugger) {
         .unwrap()
         .into_stopped()
         .unwrap();
-    assert_eq!(stop.frame.unwrap().line, 9);
+    assert_eq!(
+        stop.frame.unwrap().line,
+        line_of(fixture().join("tests/test_main.py"), "failing-assert")
+    );
     dbg.cont().await.unwrap().into_exited().unwrap();
     let result = dbg.debug_test_result().unwrap();
     assert_eq!(result.outcome, Some(TestOutcome::Failed));

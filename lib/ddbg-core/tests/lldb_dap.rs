@@ -2,6 +2,9 @@
 //!
 //! Ignored by default: run with `cargo test -p ddbg-core -- --ignored`.
 
+mod common;
+
+use common::line_of;
 use std::path::PathBuf;
 use std::process::Command as Process;
 use std::sync::Arc;
@@ -63,7 +66,7 @@ async fn debug_rust_executable() {
 
     e.execute(Command::Break(Location::Source(SourceLocation::new(
         "src/main.rs",
-        14,
+        line_of(dir.join("src/main.rs"), "call-add"),
     ))))
     .await
     .unwrap();
@@ -76,7 +79,7 @@ async fn debug_rust_executable() {
     };
     assert_eq!(info.reason, StopReason::Breakpoint(vec![BreakpointId(1)]));
     let frame = info.frame.unwrap();
-    assert_eq!(frame.line, 14);
+    assert_eq!(frame.line, line_of(dir.join("src/main.rs"), "call-add"));
     assert!(frame.name.contains("main"), "{}", frame.name);
 
     let Reply::Locals(scopes) = e.execute(Command::Locals).await.unwrap() else {
@@ -200,7 +203,10 @@ async fn conditional_source_and_function_breakpoints() {
     let dir = fixture().canonicalize().unwrap();
     for (location, expression) in [
         (
-            Location::Source(SourceLocation::new("src/main.rs", 14)),
+            Location::Source(SourceLocation::new(
+                "src/main.rs",
+                line_of(dir.join("src/main.rs"), "call-add"),
+            )),
             "point.x",
         ),
         (
@@ -264,7 +270,7 @@ async fn watch_expressions_follow_frames_assignments_and_restarts() {
     let mut rx = e.subscribe();
     e.execute(Command::Break(Location::Source(SourceLocation::new(
         "src/main.rs",
-        14,
+        line_of(fixture().join("src/main.rs"), "call-add"),
     ))))
     .await
     .unwrap();

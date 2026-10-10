@@ -2,6 +2,9 @@
 //!
 //! Ignored by default: run with `cargo test -p ddbg-driver -- --ignored`.
 
+mod common;
+
+use common::line_of;
 use std::path::PathBuf;
 use std::process::Command as Process;
 
@@ -24,12 +27,13 @@ fn build_fixture() {
 #[ignore = "requires lldb-dap"]
 async fn typed_api() {
     build_fixture();
+    let line = line_of(fixture().join("src/main.rs"), "call-add");
     let mut dbg = Debugger::from_cli(["--", "target/debug/hello-rust"], fixture()).unwrap();
 
-    let bp = dbg.break_at("src/main.rs", 14).await.unwrap();
+    let bp = dbg.break_at("src/main.rs", line).await.unwrap();
     let stop = dbg.run().await.unwrap().into_stopped().unwrap();
     assert_eq!(stop.reason, StopReason::Breakpoint(vec![bp.id]));
-    assert_eq!(stop.frame.unwrap().line, 14);
+    assert_eq!(stop.frame.unwrap().line, line);
 
     assert_eq!(dbg.print("point.x").await.unwrap().value, "3");
     let (_, children) = dbg.print_with_children("point").await.unwrap();

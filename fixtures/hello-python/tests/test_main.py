@@ -6,4 +6,4 @@ def test_adds():
 
 
 def test_fails():
-    assert add(2, 2) == 5
+    assert add(2, 2) == 5  # ddbg:failing-assert

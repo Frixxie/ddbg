@@ -11,7 +11,7 @@ fn add(a: i32, b: i32) -> i32 {
 fn main() {
     let point = Point { x: 3, y: 4 };
     let greeting = String::from("hello");
-    let total = add(point.x, point.y); // line 14
+    let total = add(point.x, point.y); // ddbg:call-add
     println!("{greeting}: {total}");
 }
 

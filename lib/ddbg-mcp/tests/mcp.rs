@@ -4,6 +4,9 @@
 //! `cargo test -p ddbg-mcp -- --ignored`. The Python test uses
 //! `$DDBG_PYTHON` (default `python3`) and skips itself without debugpy.
 
+mod common;
+
+use common::line_of;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
@@ -287,7 +290,7 @@ async fn list_results_are_objects() {
     call(
         &client,
         "set_breakpoint",
-        json!({ "file": "main.py", "line": 18 }),
+        json!({ "file": "main.py", "line": line_of(fixture("hello-python").join("main.py"), "call-add") }),
     )
     .await;
     let bps = call(&client, "list_breakpoints", json!({})).await;
@@ -308,7 +311,7 @@ async fn conditional_breakpoints_can_be_configured_and_edited_before_launch() {
     let result = call_raw(
         &client,
         "set_breakpoint",
-        json!({ "file": "main.py", "line": 18, "condition": "count > 2" }),
+        json!({ "file": "main.py", "line": line_of(fixture("hello-python").join("main.py"), "call-add"), "condition": "count > 2" }),
     )
     .await;
     assert_eq!(
@@ -382,7 +385,7 @@ async fn debug_rust_program() {
     let bp = call(
         &client,
         "set_breakpoint",
-        json!({ "file": "src/main.rs", "line": 14 }),
+        json!({ "file": "src/main.rs", "line": line_of(dir.join("src/main.rs"), "call-add") }),
     )
     .await;
     assert_eq!(bp["id"], 1);
@@ -398,7 +401,10 @@ async fn debug_rust_program() {
     let result = call_raw(&client, "run", json!({})).await;
     let stop = result.structured_content.clone().unwrap();
     assert_eq!(stop["state"], "stopped", "{stop}");
-    assert_eq!(stop["frame"]["line"], 14);
+    assert_eq!(
+        stop["frame"]["line"],
+        line_of(dir.join("src/main.rs"), "call-add")
+    );
     assert_eq!(stop["watches"][0]["value"], "3");
     assert!(stop["watches"][1]["error"].is_string());
     assert!(summary(&result).contains("add(point.x"), "{result:?}");
@@ -534,12 +540,15 @@ async fn debug_python_script() {
     call(
         &client,
         "set_breakpoint",
-        json!({ "file": "main.py", "line": 18 }),
+        json!({ "file": "main.py", "line": line_of(fixture("hello-python").join("main.py"), "call-add") }),
     )
     .await;
     let stop = call(&client, "run", json!({})).await;
     assert_eq!(stop["state"], "stopped", "{stop}");
-    assert_eq!(stop["frame"]["line"], 18);
+    assert_eq!(
+        stop["frame"]["line"],
+        line_of(fixture("hello-python").join("main.py"), "call-add")
+    );
 
     let value = call(&client, "evaluate", json!({ "expression": "point.x" })).await;
     assert_eq!(value["value"], "3");
@@ -580,7 +589,7 @@ async fn python_program_arguments() {
     call(
         &client,
         "set_breakpoint",
-        json!({ "file": "main.py", "line": 63 }),
+        json!({ "file": "main.py", "line": line_of(fixture("python-features").join("main.py"), "print-results") }),
     )
     .await;
     for (run, expected) in [

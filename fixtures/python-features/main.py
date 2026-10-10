@@ -60,7 +60,7 @@ def main():
         risky(0)
     except ZeroDivisionError as err:
         caught = str(err)
-    print(data, rect.area(), acc, steps, threads, labels, caught)
+    print(data, rect.area(), acc, steps, threads, labels, caught)  # ddbg:print-results
     if "--crash" in sys.argv:
         risky(0)
     if "--spin" in sys.argv:

@@ -15,7 +15,7 @@ def add(a, b):
 def main():
     point = Point(3, 4)
     greeting = "hello"
-    total = add(point.x, point.y)  # line 18
+    total = add(point.x, point.y)  # ddbg:call-add
     print(f"{greeting}: {total}")
 
 

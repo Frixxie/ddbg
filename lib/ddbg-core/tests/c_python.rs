@@ -4,6 +4,9 @@
 //! The Python test uses `$DDBG_PYTHON` (default `python3`) and skips itself
 //! when that interpreter cannot `import debugpy`.
 
+mod common;
+
+use common::line_of;
 use std::path::PathBuf;
 use std::process::Command as Process;
 use std::sync::Arc;
@@ -119,7 +122,7 @@ async fn debug_c_executable() {
         dir.clone(),
         dir.join("hello-c"),
         "main.c",
-        16,
+        line_of(dir.join("main.c"), "call-add"),
     )
     .await;
 }
@@ -142,7 +145,7 @@ async fn debug_python_script() {
         dir.clone(),
         dir.join("main.py"),
         "main.py",
-        18,
+        line_of(dir.join("main.py"), "call-add"),
     )
     .await;
 }
