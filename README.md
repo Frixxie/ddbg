@@ -3,10 +3,10 @@
 A terminal-first, language-agnostic debugger with first-class test debugging,
 built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
 
-> Status: early. Program and test debugging work for Rust (`lldb-dap`) and,
-> experimentally, .NET xUnit v3 on Microsoft.Testing.Platform (`netcoredbg`).
-> Program debugging (no test discovery yet) works for C/C++ (`lldb-dap`) and
-> Python (`debugpy`).
+> Status: early. Program and test debugging work for Rust (`lldb-dap`), Python
+> with pytest (`debugpy`) and, experimentally, .NET xUnit v3 on
+> Microsoft.Testing.Platform (`netcoredbg`). Program debugging (no test
+> discovery yet) works for C/C++ (`lldb-dap`).
 
 ## Requirements
 
@@ -19,6 +19,9 @@ built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
   - **Python:** `debugpy` (`python3 -m pip install debugpy`). ddbg runs
     `python -m debugpy.adapter` with the project's interpreter: `$VIRTUAL_ENV`,
     else `.venv`/`venv`/`env` in the project root, else `python3` on `PATH`.
+    uv projects (`uv.lock` or a `[tool.uv]` table in `pyproject.toml`) instead
+    use `uv run --with debugpy --with pytest python -m debugpy.adapter` when
+    `uv` is on `PATH`, so neither needs to be installed in the project.
 
 The adapter is picked from the detected project (`Cargo.toml`, `*.csproj`,
 `pyproject.toml`/`setup.py`/`requirements.txt`, `CMakeLists.txt`/`Makefile`/
@@ -286,7 +289,8 @@ they are evaluated automatically. Watch IDs are separate from breakpoint IDs.
 
 ### Tests
 
-Inside a Cargo or .NET project, `tests` builds the test executables and lists them;
+Inside a Cargo, .NET or Python project, `tests` builds the test executables (or
+collects pytest node IDs) and lists them;
 `test-run` and `test-debug` take a number from that list or a name:
 
 ```console
@@ -298,6 +302,13 @@ ddbg> test-debug 2
 ```
 
 `test-debug -b <test>` (or `--break`) also sets a breakpoint at the start of the test.
+
+Python tests are collected and run with pytest (`python -m pytest`), launched
+the same way as the debugger: `uv run --with pytest` for uv projects, otherwise
+the project's virtualenv (`$VIRTUAL_ENV`, `.venv`, `venv` or `env`) or `python3`.
+An `--adapter` starting with `uv` or `python…` selects the launcher too. A
+plain interpreter needs `pytest`, and `debugpy` for `test-debug`. Tests are named by node ID, e.g.
+`tests/test_main.py::test_adds`.
 
 .NET support covers xUnit v3 test projects on Microsoft.Testing.Platform
 (`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`).
@@ -457,7 +468,7 @@ cargo test
 
 End-to-end tests against real adapters (`fixtures/hello-rust`, `hello-c` via
 `make`, and `hello-python` with `$DDBG_PYTHON`, default `python3`, which must
-have `debugpy`):
+have `debugpy`; the pytest regression also needs `pytest` and skips without it):
 
 ```console
 cargo test -p ddbg-core -p ddbg-driver -- --ignored

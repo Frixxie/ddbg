@@ -46,6 +46,8 @@ struct State {
     stderr_seen: usize,
     stdout_plain: PlainOutput,
     stderr_plain: PlainOutput,
+    /// Program last launched or detected, reused by `run` with only `args`.
+    program: Option<String>,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,8 @@ pub struct RunParams {
     /// Program to run instead of the current one. Bare names resolve against
     /// detected project binaries.
     pub program: Option<String>,
+    /// Arguments for the program. Without `program`, the current program is
+    /// rerun with these arguments; empty keeps the previous arguments.
     #[serde(default)]
     pub args: Vec<String>,
     /// How long to wait for the program to halt, in milliseconds (default 30000).
@@ -267,7 +271,7 @@ fn to_value(v: impl Serialize) -> Value {
 }
 
 enum Resume {
-    Run(Option<(String, Vec<String>)>),
+    Run(Option<String>, Vec<String>),
     Attach(u32),
     Continue,
     Next,
@@ -296,8 +300,17 @@ impl DdbgServer {
         // Only report events caused by this command.
         dbg.take_transcript();
         let result = match cmd {
-            Resume::Run(None) => dbg.run().await,
-            Resume::Run(Some((p, a))) => dbg.run_program(p, a).await,
+            Resume::Run(None, args) if args.is_empty() => dbg.run().await,
+            Resume::Run(None, args) => match st.program.clone() {
+                Some(p) => dbg.run_program(p, args).await,
+                None => Err(anyhow::anyhow!(
+                    "no program to pass arguments to; set `program`"
+                )),
+            },
+            Resume::Run(Some(p), args) => {
+                st.program = Some(p.clone());
+                dbg.run_program(p, args).await
+            }
             Resume::Attach(pid) => dbg.attach(pid).await,
             Resume::Continue => dbg.cont().await,
             Resume::Next => dbg.next().await,
@@ -373,7 +386,7 @@ impl DdbgServer {
         is not launched until `run` unless `stop_on_entry` is set. Entry-stop startup is \
         asynchronous: call `wait` to observe the stop before inspecting frames or resuming."
     )]
-    async fn start_session(&self, Parameters(p): Parameters<StartSessionParams>) -> ToolResult {
+    async fn start_session(&self, Parameters(mut p): Parameters<StartSessionParams>) -> ToolResult {
         if let Some(engine) = self.engine.lock().unwrap().take() {
             // Unblocks a resuming command that may hold the session.
             tokio::spawn(async move { engine.execute(Command::Quit).await });
@@ -403,9 +416,14 @@ impl DdbgServer {
             argv.push("--".into());
             argv.push(program);
             argv.extend(p.args);
+            p.args = Vec::new();
         }
         let prepared = Args::try_parse_from(argv)
             .map_err(anyhow::Error::from)
+            .map(|mut args| {
+                args.detected_args = p.args;
+                args
+            })
             .and_then(|args| Ok((args, cwd.canonicalize()?)))
             .and_then(|(args, cwd)| ddbg_cli::prepare(&args, cwd));
         let prepared = match prepared {
@@ -449,6 +467,7 @@ impl DdbgServer {
             stderr_seen: 0,
             stdout_plain: PlainOutput::default(),
             stderr_plain: PlainOutput::default(),
+            program: info.program.clone(),
         });
         ok(Some(summary), info)
     }
@@ -483,8 +502,8 @@ impl DdbgServer {
         breakpoint, exits, or the timeout passes."
     )]
     async fn run(&self, Parameters(p): Parameters<RunParams>) -> ToolResult {
-        let target = p.program.map(|prog| (prog, p.args));
-        self.resume(Resume::Run(target), p.timeout_ms).await
+        self.resume(Resume::Run(p.program, p.args), p.timeout_ms)
+            .await
     }
 
     #[tool(
@@ -851,7 +870,7 @@ impl DdbgServer {
         .await
     }
 
-    #[tool(description = "Discover tests in the project (Rust and .NET).")]
+    #[tool(description = "Discover tests in the project (Rust, .NET and Python/pytest).")]
     async fn list_tests(&self, Parameters(p): Parameters<ListTestsParams>) -> ToolResult {
         let mut guard = self.state.lock().await;
         let Some(st) = guard.as_mut() else {

@@ -47,6 +47,15 @@ pub fn adapter_for_command(program: &str, args: Vec<String>) -> Box<dyn DebugAda
             program: program.to_owned(),
             args: if args.is_empty() { default.args } else { args },
         })
+    } else if name == "uv" || name == format!("uv{}", std::env::consts::EXE_SUFFIX) {
+        Box::new(if args.is_empty() {
+            DebugpyAdapter::uv()
+        } else {
+            DebugpyAdapter {
+                program: program.to_owned(),
+                args,
+            }
+        })
     } else if name.starts_with("python") || name.starts_with("debugpy") {
         let default = DebugpyAdapter::default();
         Box::new(DebugpyAdapter {
@@ -302,6 +311,26 @@ impl DebugpyAdapter {
         }
     }
 
+    /// Through `uv run`, which uses the project's environment with `debugpy`
+    /// and `pytest` added. The debuggee runs with the adapter's interpreter.
+    pub fn uv() -> Self {
+        Self {
+            program: "uv".into(),
+            args: [
+                "run",
+                "--with",
+                "debugpy",
+                "--with",
+                "pytest",
+                "python",
+                "-m",
+                "debugpy.adapter",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        }
+    }
+
     /// The interpreter, when the adapter is started through one (`python -m`).
     fn python(&self) -> Option<String> {
         let name = Path::new(&self.program).file_name()?.to_string_lossy();
@@ -492,6 +521,15 @@ mod tests {
             adapter_for_command(".venv/bin/python", vec![]).id(),
             "debugpy"
         );
+        assert_eq!(adapter_for_command("uv", vec![]).id(), "debugpy");
+    }
+
+    #[test]
+    fn debugpy_through_uv_uses_the_adapter_interpreter() {
+        let a = DebugpyAdapter::uv();
+        assert_eq!(a.args[..2], ["run", "--with"]);
+        let v = a.build_launch_request(&target()).unwrap();
+        assert!(v.get("python").is_none());
     }
 
     #[test]

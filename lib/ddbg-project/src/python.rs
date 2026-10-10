@@ -87,6 +87,37 @@ fn is_entry_point(path: &Path) -> bool {
     })
 }
 
+/// How to start Python for a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythonLauncher {
+    /// `uv run`, for projects managed by uv.
+    Uv,
+    /// A specific interpreter.
+    Interpreter(PathBuf),
+}
+
+/// The launcher for a project: `uv run` for uv projects (`uv.lock` or a
+/// `[tool.uv]` table) when `uv` is on `PATH`, else [`python_interpreter`],
+/// else `python3`.
+pub fn python_launcher(root: &Path) -> PythonLauncher {
+    if is_uv_project(root) && on_path("uv") {
+        return PythonLauncher::Uv;
+    }
+    PythonLauncher::Interpreter(python_interpreter(root).unwrap_or_else(|| "python3".into()))
+}
+
+fn is_uv_project(root: &Path) -> bool {
+    root.join("uv.lock").is_file()
+        || fs::read_to_string(root.join("pyproject.toml"))
+            .is_ok_and(|s| s.lines().any(|l| l.trim_start().starts_with("[tool.uv")))
+}
+
+fn on_path(program: &str) -> bool {
+    let name = format!("{program}{}", std::env::consts::EXE_SUFFIX);
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(&name).is_file()))
+}
+
 /// The interpreter to use for a project: a local virtualenv when present,
 /// otherwise `None` (callers fall back to `python3` on `PATH`).
 pub fn python_interpreter(root: &Path) -> Option<PathBuf> {
@@ -138,5 +169,8 @@ mod tests {
             vec![dir.join("main.py"), dir.join("pkg/__main__.py")]
         );
         assert_eq!(p.binary, Some(dir.join("main.py")));
+        assert!(!is_uv_project(&dir));
+        fs::write(dir.join("pyproject.toml"), "[project]\n\n[tool.uv]\n").unwrap();
+        assert!(is_uv_project(&dir));
     }
 }

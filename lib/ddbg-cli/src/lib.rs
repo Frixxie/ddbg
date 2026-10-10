@@ -21,8 +21,8 @@ use ddbg_core::adapter::{
 };
 use ddbg_core::command::Command;
 use ddbg_core::{AttachTarget, EngineConfig, LaunchTarget, engine};
-use ddbg_project::{Project, ProjectKind};
-use ddbg_test::{AnyProvider, DotNetTestProvider, RustTestProvider};
+use ddbg_project::{Project, ProjectKind, PythonLauncher};
+use ddbg_test::{AnyProvider, DotNetTestProvider, PythonTestProvider, RustTestProvider};
 
 pub use args::{Args, Subcommand};
 pub use session::{Outcome, Session, TestCase};
@@ -112,6 +112,9 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
         && args.attach.is_none()
     {
         target = discover_target(project, &mut notes);
+        if let Some(t) = &mut target {
+            t.args.clone_from(&args.detected_args);
+        }
     }
     if let Some(t) = &mut target {
         t.cwd.clone_from(&cwd);
@@ -162,7 +165,29 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
             let provider = match p.kind {
                 ProjectKind::Rust => Some(AnyProvider::Rust(RustTestProvider::new(&p.root))),
                 ProjectKind::DotNet => Some(AnyProvider::DotNet(DotNetTestProvider::new(&p.root))),
-                ProjectKind::Python | ProjectKind::C => None,
+                ProjectKind::Python => {
+                    let mut provider = PythonTestProvider::new(&p.root);
+                    // Run pytest the same way as the debugger.
+                    let program = args
+                        .adapter
+                        .as_deref()
+                        .and_then(|cmd| parser::split_words(cmd).ok())
+                        .and_then(|words| words.into_iter().next());
+                    let name = program.as_deref().and_then(|p| {
+                        std::path::Path::new(p)
+                            .file_stem()
+                            .map(|n| n.to_string_lossy().into_owned())
+                    });
+                    match (program, name.as_deref()) {
+                        (Some(_), Some("uv")) => provider = provider.with_uv(),
+                        (Some(python), Some(n)) if n.starts_with("python") => {
+                            provider = provider.with_python(python)
+                        }
+                        _ => {}
+                    }
+                    Some(AnyProvider::Python(provider))
+                }
+                ProjectKind::C => None,
             };
             let msg = format!(
                 "test discovery is not supported for {:?} projects yet",
@@ -222,9 +247,11 @@ fn kind_of_target(t: &LaunchTarget) -> Option<ProjectKind> {
 fn default_adapter(kind: Option<&ProjectKind>, root: &std::path::Path) -> Arc<dyn DebugAdapter> {
     match kind {
         Some(ProjectKind::DotNet) => Arc::new(NetCoreDbgAdapter::default()),
-        Some(ProjectKind::Python) => Arc::new(match ddbg_project::python_interpreter(root) {
-            Some(python) => DebugpyAdapter::with_python(python.to_string_lossy()),
-            None => DebugpyAdapter::default(),
+        Some(ProjectKind::Python) => Arc::new(match ddbg_project::python_launcher(root) {
+            PythonLauncher::Uv => DebugpyAdapter::uv(),
+            PythonLauncher::Interpreter(python) => {
+                DebugpyAdapter::with_python(python.to_string_lossy())
+            }
         }),
         Some(ProjectKind::C) => Arc::new(LldbDapAdapter::default()),
         Some(ProjectKind::Rust) | None => Arc::new(LldbDapAdapter::for_rust()),

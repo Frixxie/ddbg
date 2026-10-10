@@ -4,6 +4,7 @@
 //! [`DebugTarget`]. They never debug processes themselves.
 
 pub mod dotnet;
+pub mod python;
 pub mod rust;
 
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use ddbg_core::DebugTarget;
 
 pub use dotnet::DotNetTestProvider;
+pub use python::PythonTestProvider;
 pub use rust::RustTestProvider;
 
 /// Identifies which provider owns a test.
@@ -18,6 +20,7 @@ pub use rust::RustTestProvider;
 pub enum ProviderId {
     Rust,
     DotNet,
+    Python,
 }
 
 /// Provider-specific identity needed to locate and run a test.
@@ -39,6 +42,10 @@ pub enum ProviderData {
         /// Project file the assembly is built from.
         project: PathBuf,
         framework: dotnet::Framework,
+    },
+    Python {
+        /// Project root; node IDs are relative to it and runs start here.
+        root: PathBuf,
     },
 }
 
@@ -168,6 +175,7 @@ pub trait TestProvider {
 pub enum AnyProvider {
     Rust(RustTestProvider),
     DotNet(DotNetTestProvider),
+    Python(PythonTestProvider),
 }
 
 impl TestProvider for AnyProvider {
@@ -175,6 +183,7 @@ impl TestProvider for AnyProvider {
         match self {
             Self::Rust(p) => p.id(),
             Self::DotNet(p) => p.id(),
+            Self::Python(p) => p.id(),
         }
     }
 
@@ -182,6 +191,7 @@ impl TestProvider for AnyProvider {
         match self {
             Self::Rust(p) => p.discover(query).await,
             Self::DotNet(p) => p.discover(query).await,
+            Self::Python(p) => p.discover(query).await,
         }
     }
 
@@ -189,6 +199,7 @@ impl TestProvider for AnyProvider {
         match self {
             Self::Rust(p) => p.run(tests).await,
             Self::DotNet(p) => p.run(tests).await,
+            Self::Python(p) => p.run(tests).await,
         }
     }
 
@@ -196,6 +207,7 @@ impl TestProvider for AnyProvider {
         match self {
             Self::Rust(p) => p.debug_target(test).await,
             Self::DotNet(p) => p.debug_target(test).await,
+            Self::Python(p) => p.debug_target(test).await,
         }
     }
 }

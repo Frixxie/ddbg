@@ -46,6 +46,10 @@ pub struct Args {
     /// Program to debug, followed by its arguments (after `--`).
     #[arg(last = true, value_name = "PROGRAM [ARGS]...")]
     pub program: Vec<String>,
+
+    /// Arguments for an auto-detected program, for programmatic callers.
+    #[arg(skip)]
+    pub detected_args: Vec<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]

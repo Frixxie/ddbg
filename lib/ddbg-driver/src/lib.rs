@@ -76,6 +76,7 @@ impl DebugTestRun {
             match self.test.id.provider {
                 ddbg_test::ProviderId::DotNet => ddbg_test::dotnet::parse_counts(&output),
                 ddbg_test::ProviderId::Rust => ddbg_test::rust::parse_counts(&output),
+                ddbg_test::ProviderId::Python => ddbg_test::python::parse_counts(&output),
             }
         } else {
             None

@@ -552,3 +552,48 @@ async fn debug_python_script() {
     call(&client, "end_session", json!({})).await;
     client.cancel().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires debugpy"]
+async fn python_program_arguments() {
+    let python = std::env::var("DDBG_PYTHON").unwrap_or_else(|_| "python3".into());
+    let has_debugpy = Process::new(&python)
+        .args(["-c", "import debugpy"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !has_debugpy {
+        eprintln!("skipping: {python} cannot import debugpy");
+        return;
+    }
+    let client = connect().await;
+    // Without `program`, the arguments go to the detected script.
+    call(
+        &client,
+        "start_session",
+        json!({
+            "cwd": fixture("python-features"),
+            "args": ["--first"],
+            "adapter": format!("{python} -m debugpy.adapter"),
+        }),
+    )
+    .await;
+    call(
+        &client,
+        "set_breakpoint",
+        json!({ "file": "main.py", "line": 63 }),
+    )
+    .await;
+    for (run, expected) in [
+        (json!({}), "['--first']"),
+        (json!({ "args": ["--second"] }), "['--second']"),
+        (json!({}), "['--second']"),
+    ] {
+        let stop = call(&client, "run", run).await;
+        assert_eq!(stop["state"], "stopped", "{stop}");
+        let argv = call(&client, "evaluate", json!({ "expression": "sys.argv[1:]" })).await;
+        assert_eq!(argv["value"], expected);
+    }
+
+    call(&client, "end_session", json!({})).await;
+    client.cancel().await.unwrap();
+}

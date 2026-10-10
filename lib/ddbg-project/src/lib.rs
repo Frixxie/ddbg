@@ -11,7 +11,7 @@ mod dotnet;
 mod python;
 
 pub use dotnet::{DotNetLaunch, dotnet_launch, projects_in as dotnet_projects};
-pub use python::python_interpreter;
+pub use python::{PythonLauncher, python_interpreter, python_launcher};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
