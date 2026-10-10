@@ -250,6 +250,50 @@ fn text(t: impl Into<String>) -> ToolResult {
     )]))
 }
 
+/// Resolve the working directory and run the CLI's startup for `p`.
+fn prepare_session(mut p: StartSessionParams) -> anyhow::Result<ddbg_cli::Prepared> {
+    let cwd = match p.cwd {
+        Some(c) => PathBuf::from(c),
+        None => std::env::current_dir()?,
+    };
+    let mut argv = vec!["ddbg".to_owned()];
+    if let Some(a) = p.adapter {
+        argv.extend(["--adapter".to_owned(), a]);
+    }
+    if p.stop_on_entry {
+        argv.push("--stop-on-entry".into());
+    }
+    if p.no_detect {
+        argv.push("--no-detect".into());
+    }
+    if let Some(program) = p.program {
+        argv.push("--".into());
+        argv.push(program);
+        argv.extend(p.args);
+        p.args = Vec::new();
+    }
+    Args::try_parse_from(argv)
+        .map_err(anyhow::Error::from)
+        .map(|mut args| {
+            args.detected_args = p.args;
+            args
+        })
+        .and_then(|args| Ok((args, cwd.canonicalize()?)))
+        .and_then(|(args, cwd)| ddbg_cli::prepare(&args, cwd))
+}
+
+/// Human-readable summary of a newly started session.
+fn start_summary(info: &SessionInfo) -> String {
+    let summary = info.notes.join("\n");
+    if !summary.is_empty() {
+        return summary;
+    }
+    match &info.program {
+        Some(p) => format!("Debugging {p}"),
+        None => "No program selected; pass one to `run`".into(),
+    }
+}
+
 fn fail(e: anyhow::Error) -> ToolResult {
     Ok(CallToolResult::error(vec![ContentBlock::text(format!(
         "{e:#}"
@@ -389,7 +433,7 @@ impl DdbgServer {
         is not launched until `run` unless `stop_on_entry` is set. Entry-stop startup is \
         asynchronous: call `wait` to observe the stop before inspecting frames or resuming."
     )]
-    async fn start_session(&self, Parameters(mut p): Parameters<StartSessionParams>) -> ToolResult {
+    async fn start_session(&self, Parameters(p): Parameters<StartSessionParams>) -> ToolResult {
         if let Some(engine) = self
             .engine
             .lock()
@@ -403,38 +447,8 @@ impl DdbgServer {
         if let Some(old) = guard.take() {
             let _ = old.dbg.quit().await;
         }
-        let cwd = match p.cwd {
-            Some(c) => PathBuf::from(c),
-            None => match std::env::current_dir() {
-                Ok(c) => c,
-                Err(e) => return fail(e.into()),
-            },
-        };
-        let mut argv = vec!["ddbg".to_owned()];
-        if let Some(a) = p.adapter {
-            argv.extend(["--adapter".to_owned(), a]);
-        }
-        if p.stop_on_entry {
-            argv.push("--stop-on-entry".into());
-        }
-        if p.no_detect {
-            argv.push("--no-detect".into());
-        }
-        if let Some(program) = p.program {
-            argv.push("--".into());
-            argv.push(program);
-            argv.extend(p.args);
-            p.args = Vec::new();
-        }
-        let prepared = Args::try_parse_from(argv)
-            .map_err(anyhow::Error::from)
-            .map(|mut args| {
-                args.detected_args = p.args;
-                args
-            })
-            .and_then(|args| Ok((args, cwd.canonicalize()?)))
-            .and_then(|(args, cwd)| ddbg_cli::prepare(&args, cwd));
-        let prepared = match prepared {
+        let stop_on_entry = p.stop_on_entry;
+        let prepared = match prepare_session(p) {
             Ok(p) => p,
             Err(e) => return fail(e),
         };
@@ -458,16 +472,10 @@ impl DdbgServer {
                 .collect(),
             notes: prepared.notes,
         };
-        if p.stop_on_entry {
+        if stop_on_entry {
             info.notes.push("Entry-stop startup is asynchronous; call `wait` before inspecting frames or resuming.".into());
         }
-        let mut summary = info.notes.join("\n");
-        if summary.is_empty() {
-            summary = match &info.program {
-                Some(p) => format!("Debugging {p}"),
-                None => "No program selected; pass one to `run`".into(),
-            };
-        }
+        let summary = start_summary(&info);
         *self.engine.lock().unwrap_or_else(PoisonError::into_inner) = Some(dbg.engine().clone());
         *guard = Some(State {
             dbg,

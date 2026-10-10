@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use ddbg_core::DebugEvent;
 use ddbg_core::breakpoint::{Breakpoint, Location, SourceLocation};
-use ddbg_core::command::{Command, Reply};
+use ddbg_core::command::{Command, Reply, ScopeVariables};
 use ddbg_core::event::{ExceptionInfo, OutputCategory, StopInfo};
 use ddbg_core::frame::StackFrame;
 use ddbg_core::session::StopReason;
-use ddbg_core::variable::Variable;
+use ddbg_core::thread::{Thread, ThreadId};
+use ddbg_core::variable::{Evaluation, Variable};
 
 use crate::parser::COMMANDS;
 use ddbg_core::watch::Watch;
@@ -280,29 +281,7 @@ impl Renderer {
             }
             Reply::Attached(pid) => Some(format!("Attached to process {pid}.")),
             Reply::BreakpointSet { breakpoint, new } => {
-                let mut s = format!(
-                    "Breakpoint {} {} {}",
-                    breakpoint.id,
-                    if *new || matches!(command, Command::Condition { .. }) {
-                        "at"
-                    } else {
-                        "already set at"
-                    },
-                    self.bp_location(breakpoint)
-                );
-                if matches!(
-                    command,
-                    Command::Condition {
-                        condition: None,
-                        ..
-                    }
-                ) {
-                    s.push_str(" (condition cleared)");
-                }
-                if let Some(m) = &breakpoint.message {
-                    let _ = write!(s, " ({m})");
-                }
-                Some(s)
+                Some(self.breakpoint_set(command, breakpoint, *new))
             }
             Reply::BreakpointDeleted(id) => Some(format!("Deleted breakpoint {id}")),
             Reply::WatchSet { watch: w, new } => Some(format!(
@@ -317,74 +296,16 @@ impl Renderer {
                 watches.iter().map(watch).collect::<Vec<_>>().join("\n")
             }),
             Reply::Breakpoints(bps) if bps.is_empty() => Some("No breakpoints.".into()),
-            Reply::Breakpoints(bps) => Some(
-                bps.iter()
-                    .map(|bp| {
-                        format!(
-                            "{:<3} {} {}",
-                            bp.id,
-                            self.bp_location(bp),
-                            if bp.verified { "" } else { "(pending)" }
-                        )
-                        .trim_end()
-                        .to_owned()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            Reply::Backtrace { frames, selected } => Some(
-                frames
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| {
-                        let marker = if Some(i) == *selected { '>' } else { ' ' };
-                        format!("{marker}#{i:<3} {} at {}", f.name, self.frame_location(f))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            Reply::Threads { threads, selected } => Some(
-                threads
-                    .iter()
-                    .map(|t| {
-                        let marker = if Some(t.id) == *selected { '*' } else { ' ' };
-                        format!("{marker} {:<6} {}", t.id, t.name)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+            Reply::Breakpoints(bps) => Some(self.breakpoint_list(bps)),
+            Reply::Backtrace { frames, selected } => Some(self.backtrace(frames, *selected)),
+            Reply::Threads { threads, selected } => Some(thread_list(threads, *selected)),
             Reply::Frame { index, frame } => {
                 let mut s = format!("#{index} {} at {}", frame.name, self.frame_location(frame));
                 self.frame_with_source(frame, &mut s);
                 Some(s)
             }
-            Reply::Value(eval, children) => {
-                let mut s = eval.value.clone();
-                if !children.is_empty() && needs_expansion(&eval.value, eval.type_name.as_deref()) {
-                    s.push_str(" {\n");
-                    for v in children {
-                        let _ = writeln!(s, "    {}", variable(v));
-                    }
-                    s.push('}');
-                }
-                Some(s)
-            }
-            Reply::Locals(scopes) => {
-                let multiple = scopes.len() > 1;
-                let mut s = String::new();
-                for scope in scopes {
-                    if multiple {
-                        let _ = writeln!(s, "{}:", scope.scope);
-                    }
-                    if scope.variables.is_empty() {
-                        s.push_str("No locals.\n");
-                    }
-                    for v in &scope.variables {
-                        let _ = writeln!(s, "{}", variable(v));
-                    }
-                }
-                Some(s.trim_end().to_owned())
-            }
+            Reply::Value(eval, children) => Some(value(eval, children)),
+            Reply::Locals(scopes) => Some(locals(scopes)),
             Reply::Completions(items) => Some(
                 items
                     .iter()
@@ -394,6 +315,60 @@ impl Renderer {
             ),
             Reply::Quit => None,
         }
+    }
+
+    fn breakpoint_set(&self, command: &Command, breakpoint: &Breakpoint, new: bool) -> String {
+        let mut s = format!(
+            "Breakpoint {} {} {}",
+            breakpoint.id,
+            if new || matches!(command, Command::Condition { .. }) {
+                "at"
+            } else {
+                "already set at"
+            },
+            self.bp_location(breakpoint)
+        );
+        if matches!(
+            command,
+            Command::Condition {
+                condition: None,
+                ..
+            }
+        ) {
+            s.push_str(" (condition cleared)");
+        }
+        if let Some(m) = &breakpoint.message {
+            let _ = write!(s, " ({m})");
+        }
+        s
+    }
+
+    fn breakpoint_list(&self, bps: &[Breakpoint]) -> String {
+        bps.iter()
+            .map(|bp| {
+                format!(
+                    "{:<3} {} {}",
+                    bp.id,
+                    self.bp_location(bp),
+                    if bp.verified { "" } else { "(pending)" }
+                )
+                .trim_end()
+                .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn backtrace(&self, frames: &[StackFrame], selected: Option<usize>) -> String {
+        frames
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let marker = if Some(i) == selected { '>' } else { ' ' };
+                format!("{marker}#{i:<3} {} at {}", f.name, self.frame_location(f))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn bp_location(&self, bp: &Breakpoint) -> String {
@@ -434,6 +409,46 @@ pub fn exception_lines(ex: &ExceptionInfo, lines: &mut Vec<String>) {
         lines.push(s);
     }
     inner(ex, 0, lines);
+}
+
+fn thread_list(threads: &[Thread], selected: Option<ThreadId>) -> String {
+    threads
+        .iter()
+        .map(|t| {
+            let marker = if Some(t.id) == selected { '*' } else { ' ' };
+            format!("{marker} {:<6} {}", t.id, t.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn value(eval: &Evaluation, children: &[Variable]) -> String {
+    let mut s = eval.value.clone();
+    if !children.is_empty() && needs_expansion(&eval.value, eval.type_name.as_deref()) {
+        s.push_str(" {\n");
+        for v in children {
+            let _ = writeln!(s, "    {}", variable(v));
+        }
+        s.push('}');
+    }
+    s
+}
+
+fn locals(scopes: &[ScopeVariables]) -> String {
+    let multiple = scopes.len() > 1;
+    let mut s = String::new();
+    for scope in scopes {
+        if multiple {
+            let _ = writeln!(s, "{}:", scope.scope);
+        }
+        if scope.variables.is_empty() {
+            s.push_str("No locals.\n");
+        }
+        for v in &scope.variables {
+            let _ = writeln!(s, "{}", variable(v));
+        }
+    }
+    s.trim_end().to_owned()
 }
 
 fn needs_expansion(value: &str, type_name: Option<&str>) -> bool {

@@ -32,12 +32,9 @@ impl DdbgCompleter {
             return Vec::new();
         };
         if let Some((offset, query)) = expression_query(line, pos) {
-            let result = self.runtime.block_on(async {
-                tokio::time::timeout(Duration::from_millis(500), self.engine.execute(query)).await
-            });
-            return match result {
-                Ok(Ok(reply)) => expression_suggestions(line, offset, reply),
-                _ => Vec::new(),
+            return match self.query(query) {
+                Some(reply) => expression_suggestions(line, offset, reply),
+                None => Vec::new(),
             };
         }
         let start = pos - rest.trim_start().len();
@@ -45,60 +42,12 @@ impl DdbgCompleter {
         let mut prefix = &before[start..];
         let mut candidates = Vec::new();
         match command {
-            "break" => {
-                candidates.extend(complete_path(prefix, span, &self.cwd));
-                let functions = self
-                    .functions
-                    .get_or_insert_with(|| crate::functions::discover(&self.cwd));
-                // A single colon scopes a function to a file; `::` belongs
-                // to a qualified Rust/C++ function name.
-                let scope = prefix
-                    .char_indices()
-                    .find(|&(i, c)| {
-                        c == ':' && !prefix[..i].ends_with(':') && !prefix[i + 1..].starts_with(':')
-                    })
-                    .map(|(i, _)| &prefix[..i]);
-                for f in functions {
-                    if let Some(file) = scope {
-                        if !f.path.ends_with(file) {
-                            continue;
-                        }
-                        candidates.push(candidate(
-                            format!("{file}:{}", f.name),
-                            f.label.clone(),
-                            span,
-                        ));
-                    } else {
-                        candidates.push(candidate(f.name.clone(), f.label.clone(), span));
-                    }
-                }
-            }
+            "break" => self.break_candidates(prefix, span, &mut candidates),
             "test-run" | "test-debug" | "tests" => {
                 if command == "test-debug" {
-                    if let Some(rest) = prefix
-                        .strip_prefix("--break ")
-                        .or_else(|| prefix.strip_prefix("-b "))
-                    {
-                        prefix = rest.trim_start();
-                        span = Span::new(pos - prefix.len(), pos);
-                    } else {
-                        for flag in ["-b", "--break"] {
-                            candidates.push(candidate(
-                                flag.into(),
-                                "Break at test start".into(),
-                                span,
-                            ));
-                        }
-                    }
+                    (prefix, span) = test_debug_flags(prefix, span, pos, &mut candidates);
                 }
-                for name in self
-                    .tests
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .iter()
-                {
-                    candidates.push(candidate(name.clone(), "Test".into(), span));
-                }
+                self.test_candidates(span, &mut candidates);
             }
             "delete" | "condition" | "thread" | "frame" | "unwatch" => {
                 let query = match command {
@@ -107,10 +56,7 @@ impl DdbgCompleter {
                     "unwatch" => Command::Watches,
                     _ => Command::Backtrace,
                 };
-                if let Ok(Ok(reply)) = self.runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_millis(500), self.engine.execute(query))
-                        .await
-                }) {
+                if let Some(reply) = self.query(query) {
                     candidates.extend(reply_candidates(reply, span));
                 }
             }
@@ -122,6 +68,57 @@ impl DdbgCompleter {
         candidates.sort_by(|a, b| a.value.cmp(&b.value));
         candidates.dedup_by(|a, b| a.value == b.value);
         candidates
+    }
+
+    /// Run `query` on the engine, giving up after a short timeout.
+    fn query(&self, query: Command) -> Option<Reply> {
+        let result = self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(500), self.engine.execute(query)).await
+        });
+        match result {
+            Ok(Ok(reply)) => Some(reply),
+            _ => None,
+        }
+    }
+
+    fn break_candidates(&mut self, prefix: &str, span: Span, candidates: &mut Vec<Suggestion>) {
+        candidates.extend(complete_path(prefix, span, &self.cwd));
+        let functions = self
+            .functions
+            .get_or_insert_with(|| crate::functions::discover(&self.cwd));
+        // A single colon scopes a function to a file; `::` belongs
+        // to a qualified Rust/C++ function name.
+        let scope = prefix
+            .char_indices()
+            .find(|&(i, c)| {
+                c == ':' && !prefix[..i].ends_with(':') && !prefix[i + 1..].starts_with(':')
+            })
+            .map(|(i, _)| &prefix[..i]);
+        for f in functions {
+            if let Some(file) = scope {
+                if !f.path.ends_with(file) {
+                    continue;
+                }
+                candidates.push(candidate(
+                    format!("{file}:{}", f.name),
+                    f.label.clone(),
+                    span,
+                ));
+            } else {
+                candidates.push(candidate(f.name.clone(), f.label.clone(), span));
+            }
+        }
+    }
+
+    fn test_candidates(&self, span: Span, candidates: &mut Vec<Suggestion>) {
+        for name in self
+            .tests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            candidates.push(candidate(name.clone(), "Test".into(), span));
+        }
     }
 }
 
@@ -212,6 +209,27 @@ fn reply_candidates(reply: Reply, span: Span) -> Vec<Suggestion> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Offer `test-debug` flags, or skip past one already typed. Returns the
+/// test name prefix and its span.
+fn test_debug_flags<'a>(
+    prefix: &'a str,
+    span: Span,
+    pos: usize,
+    candidates: &mut Vec<Suggestion>,
+) -> (&'a str, Span) {
+    if let Some(rest) = prefix
+        .strip_prefix("--break ")
+        .or_else(|| prefix.strip_prefix("-b "))
+    {
+        let prefix = rest.trim_start();
+        return (prefix, Span::new(pos - prefix.len(), pos));
+    }
+    for flag in ["-b", "--break"] {
+        candidates.push(candidate(flag.into(), "Break at test start".into(), span));
+    }
+    (prefix, span)
 }
 
 impl Completer for DdbgCompleter {
