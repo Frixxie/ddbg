@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::codec::{Decoder, encode};
-use crate::protocol::{DapEvent, DapRequest, Message, Request, Response};
+use crate::protocol::{DapEvent, DapRequest, Event, Message, Request, Response};
 use anyhow::{Context as _, Result, anyhow};
 
 /// Something received asynchronously from the adapter.
@@ -22,6 +22,13 @@ pub enum Incoming {
     Event(DapEvent),
     /// Reverse request (adapter → client), e.g. `runInTerminal`.
     /// Must be answered with [`DapClient::respond`].
+    Request(Request),
+}
+
+/// Like [`Incoming`], with events kept exactly as received.
+#[derive(Debug, Clone)]
+pub enum RawIncoming {
+    Event(Event),
     Request(Request),
 }
 
@@ -45,12 +52,38 @@ impl DapClient {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::connect_with(reader, writer, |msg| match msg {
+            RawIncoming::Event(e) => Incoming::Event(e.into()),
+            RawIncoming::Request(r) => Incoming::Request(r),
+        })
+    }
+
+    /// Like [`connect`](Self::connect), but events are delivered untyped,
+    /// exactly as received. Used to relay messages without loss.
+    pub fn connect_raw<R, W>(reader: R, writer: W) -> (Self, mpsc::UnboundedReceiver<RawIncoming>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_with(reader, writer, |msg| msg)
+    }
+
+    fn connect_with<R, W, T>(
+        reader: R,
+        writer: W,
+        convert: fn(RawIncoming) -> T,
+    ) -> (Self, mpsc::UnboundedReceiver<T>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+        T: Send + 'static,
+    {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let pending: Pending = Arc::default();
 
         tokio::spawn(write_loop(writer, out_rx));
-        tokio::spawn(read_loop(reader, pending.clone(), in_tx));
+        tokio::spawn(read_loop(reader, pending.clone(), in_tx, convert));
 
         let client = Self {
             seq: Arc::new(AtomicI64::new(1)),
@@ -208,10 +241,11 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     }
 }
 
-async fn read_loop<R: AsyncRead + Unpin>(
+async fn read_loop<R: AsyncRead + Unpin, T>(
     mut reader: R,
     pending: Pending,
-    in_tx: mpsc::UnboundedSender<Incoming>,
+    in_tx: mpsc::UnboundedSender<T>,
+    convert: fn(RawIncoming) -> T,
 ) {
     let mut decoder = Decoder::new();
     let mut buf = vec![0u8; 16 * 1024];
@@ -227,7 +261,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         decoder.extend(&buf[..n]);
         loop {
             match decoder.decode() {
-                Ok(Some(msg)) => dispatch(msg, &pending, &in_tx),
+                Ok(Some(msg)) => dispatch(msg, &pending, &in_tx, convert),
                 Ok(None) => break,
                 Err(e) => tracing::warn!(target: "dap", "discarding message: {e}"),
             }
@@ -240,7 +274,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
         .clear();
 }
 
-fn dispatch(msg: Message, pending: &Pending, in_tx: &mpsc::UnboundedSender<Incoming>) {
+fn dispatch<T>(
+    msg: Message,
+    pending: &Pending,
+    in_tx: &mpsc::UnboundedSender<T>,
+    convert: fn(RawIncoming) -> T,
+) {
     if tracing::enabled!(target: "dap", tracing::Level::TRACE) {
         tracing::trace!(target: "dap", "<-- {}", serde_json::to_string(&msg).unwrap_or_default());
     }
@@ -260,10 +299,10 @@ fn dispatch(msg: Message, pending: &Pending, in_tx: &mpsc::UnboundedSender<Incom
             }
         }
         Message::Event(event) => {
-            let _ = in_tx.send(Incoming::Event(event.into()));
+            let _ = in_tx.send(convert(RawIncoming::Event(event)));
         }
         Message::Request(req) => {
-            let _ = in_tx.send(Incoming::Request(req));
+            let _ = in_tx.send(convert(RawIncoming::Request(req)));
         }
     }
 }

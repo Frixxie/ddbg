@@ -176,6 +176,9 @@ impl Fake {
                         .collect();
                     self.respond(&req, json!({ "breakpoints": bps })).await;
                 }
+                "configurationDone" if self.caps["testRejectConfigurationDone"] == true => {
+                    self.reject(&req, "Process is in an unexpected state").await;
+                }
                 "configurationDone" => {
                     self.respond(&req, json!({})).await;
                     if self.caps["testDeferredStart"] == true {
@@ -279,6 +282,11 @@ impl Fake {
                         }),
                     )
                     .await
+                }
+                "continue" if self.caps["testContinueSteps"] == true => {
+                    self.respond(&req, json!({"allThreadsContinued": true})).await;
+                    self.event("stopped", json!({"reason": "step", "threadId": 1, "description": "step out"}))
+                        .await;
                 }
                 "continue" => {
                     self.respond(&req, json!({"allThreadsContinued": true}))
@@ -1275,4 +1283,55 @@ async fn exception_stop_fetches_exception_info() {
     );
     assert_eq!(ex.inner[0].message.as_deref(), Some("Bad arg"));
     assert_eq!(requests(&log, "exceptionInfo"), 1);
+}
+
+#[tokio::test]
+async fn pause_while_stopped_says_so() {
+    let (e, _) = engine();
+    let mut rx = e.subscribe();
+    e.execute(Command::Run(None)).await.unwrap();
+    wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionStopped(_))).await;
+    let err = e.execute(Command::Pause).await.unwrap_err();
+    assert_eq!(err.to_string(), ddbg_core::error::ALREADY_STOPPED);
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn step_stop_after_continue_is_explained() {
+    let (e, _, _) = engine_with(json!({"testContinueSteps": true}));
+    let mut rx = e.subscribe();
+    e.execute(Command::Run(None)).await.unwrap();
+    wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionStopped(_))).await;
+    e.execute(Command::Continue).await.unwrap();
+    let DebugEvent::SessionStopped(info) =
+        wait_for(&mut rx, |ev| matches!(ev, DebugEvent::SessionStopped(_))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(info.reason, StopReason::Step);
+    let description = info.description.unwrap();
+    assert!(
+        description.starts_with("step out: an unfinished step"),
+        "{description}"
+    );
+    e.execute(Command::Quit).await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_launch_of_missing_program_names_it() {
+    let (e, _, _) = engine_with(json!({"testRejectConfigurationDone": true}));
+    let err = e
+        .execute(Command::Run(Some(LaunchTarget::new(
+            "/nonexistent/target/debug/app",
+            vec![],
+        ))))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.starts_with("/nonexistent/target/debug/app does not exist; build it first"),
+        "{err}"
+    );
+    assert!(err.contains("unexpected state"), "{err}");
+    e.execute(Command::Quit).await.unwrap();
 }

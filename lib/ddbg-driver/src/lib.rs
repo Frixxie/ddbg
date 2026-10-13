@@ -65,18 +65,24 @@ pub struct DebugTestResult {
 struct DebugTestRun {
     test: TestCase,
     stdout: String,
+    /// Runners such as Vitest report failures on stderr.
+    stderr: String,
     finished: bool,
     exited: bool,
 }
 
 impl DebugTestRun {
     fn result(&self) -> DebugTestResult {
-        let counts = if self.finished && self.exited {
+        // js-debug reports no exit, only termination; the runner summary is
+        // the evidence that the run completed.
+        let exited = self.exited || self.test.id.provider == ddbg_test::ProviderId::Node;
+        let counts = if self.finished && exited {
             let output = plain_text(&self.stdout);
             match self.test.id.provider {
                 ddbg_test::ProviderId::DotNet => ddbg_test::dotnet::parse_counts(&output),
                 ddbg_test::ProviderId::Rust => ddbg_test::rust::parse_counts(&output),
                 ddbg_test::ProviderId::Python => ddbg_test::python::parse_counts(&output),
+                ddbg_test::ProviderId::Node => ddbg_test::node::parse_counts(&output),
             }
         } else {
             None
@@ -85,8 +91,20 @@ impl DebugTestRun {
             Some(c) if c.total != 1 => (Some(TestOutcome::Failed), Some(format!(
                 "Expected exactly one selected test to run, but the runner reported {} tests.", c.total
             ))),
+            Some(c) if c.outcome() == TestOutcome::Failed => (
+                Some(TestOutcome::Failed),
+                match self.test.id.provider {
+                    ddbg_test::ProviderId::Node => {
+                        ddbg_test::node::parse_failure(&plain_text(&format!(
+                            "{}{}",
+                            self.stdout, self.stderr
+                        )))
+                    }
+                    _ => None,
+                },
+            ),
             Some(c) => (Some(c.outcome()), None),
-            None if self.finished && !self.exited => (None, Some(
+            None if self.finished && !exited => (None, Some(
                 "Debug-test execution was interrupted; the test outcome is unknown.".into()
             )),
             None if self.finished => (None, Some(
@@ -729,7 +747,12 @@ impl Debugger {
                         run.stdout.push_str(&o.text);
                     }
                 }
-                OutputCategory::Stderr => self.stderr.push_str(&o.text),
+                OutputCategory::Stderr => {
+                    self.stderr.push_str(&o.text);
+                    if let Some(run) = &mut self.debug_test {
+                        run.stderr.push_str(&o.text);
+                    }
+                }
                 _ => {}
             }
         }
@@ -740,6 +763,7 @@ impl Debugger {
             match ev {
                 DebugEvent::SessionStarted => {
                     run.stdout.clear();
+                    run.stderr.clear();
                     run.finished = false;
                     run.exited = false;
                 }
@@ -769,6 +793,7 @@ impl Debugger {
             .map(|test| DebugTestRun {
                 test,
                 stdout: String::new(),
+                stderr: String::new(),
                 finished: false,
                 exited: false,
             });

@@ -3,14 +3,16 @@
 //! Walks upward from a directory to find a project root and, when possible,
 //! the binary that should be debugged. Supports Rust (Cargo), .NET
 //! (`*.csproj` / `*.fsproj` / `*.vbproj`, `*.sln` / `*.slnx`), Python
-//! (`pyproject.toml`, `setup.py`, ...) and C/C++ (CMake, Meson, Make)
-//! projects.
+//! (`pyproject.toml`, `setup.py`, ...), Node.js (`package.json`) and C/C++
+//! (CMake, Meson, Make) projects.
 
 mod c;
 mod dotnet;
+mod node;
 mod python;
 
 pub use dotnet::{DotNetLaunch, dotnet_launch, projects_in as dotnet_projects};
+pub use node::{has_dependency as node_has_dependency, is_script as is_node_script, node_bin};
 pub use python::{PythonLauncher, python_interpreter, python_launcher};
 
 use std::path::{Path, PathBuf};
@@ -24,6 +26,8 @@ pub enum ProjectKind {
     Rust,
     DotNet,
     Python,
+    /// JavaScript or TypeScript run by Node.js.
+    Node,
     /// C or C++ (built with CMake, Meson or Make).
     C,
 }
@@ -41,7 +45,7 @@ pub struct Project {
 
 /// Detect the project containing `dir`, if any. The nearest project marker
 /// wins; within one directory, Cargo takes precedence over .NET, then Python,
-/// then C (a Makefile often just wraps another toolchain).
+/// then Node.js, then C (a Makefile often just wraps another toolchain).
 pub fn detect(dir: &Path) -> Option<Project> {
     for d in dir.ancestors() {
         let manifest = d.join("Cargo.toml");
@@ -52,6 +56,9 @@ pub fn detect(dir: &Path) -> Option<Project> {
             return Some(p);
         }
         if let Some(p) = python::detect_in(d) {
+            return Some(p);
+        }
+        if let Some(p) = node::detect_in(d) {
             return Some(p);
         }
         if let Some(p) = c::detect_in(d) {

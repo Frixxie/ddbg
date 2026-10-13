@@ -17,13 +17,20 @@ static THEME: LazyLock<Theme> = LazyLock::new(|| {
         .expect("bundled theme")
 });
 
+/// The extension to look up a syntax by. syntect bundles no TypeScript
+/// syntax, so TypeScript is highlighted as JavaScript.
+pub fn syntax_extension(path: &Path) -> Option<&str> {
+    match path.extension()?.to_str()? {
+        "ts" | "mts" | "cts" | "tsx" | "mjs" | "cjs" | "jsx" => Some("js"),
+        e => Some(e),
+    }
+}
+
 /// Highlight a whole file (so multi-line constructs are tracked correctly),
 /// returning one ANSI-escaped string per line. Only foreground colors are
 /// emitted, and each line ends with a reset.
 pub fn highlight(path: &Path, lines: &[String]) -> Vec<String> {
-    let syntax = path
-        .extension()
-        .and_then(|e| e.to_str())
+    let syntax = syntax_extension(path)
         .and_then(|e| SYNTAXES.find_syntax_by_extension(e))
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
     let mut h = HighlightLines::new(syntax, &THEME);

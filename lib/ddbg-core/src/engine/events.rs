@@ -148,10 +148,19 @@ impl Engine {
         };
 
         self.evaluate_watches().await;
+        let mut description = s.description.or(s.text);
+        if std::mem::take(&mut self.continuing) && reason == StopReason::Step {
+            // e.g. lldb keeps a `finish` that was interrupted by a breakpoint
+            // on another thread pending, and completes it on the next resume.
+            description = Some(format!(
+                "{}: an unfinished step from an earlier `next`/`step`/`finish` completed",
+                description.as_deref().unwrap_or("step"),
+            ));
+        }
         self.emit(DebugEvent::SessionStopped(Box::new(StopInfo {
             reason,
             thread: tid,
-            description: s.description.or(s.text),
+            description,
             frame: self.session.stack.first().cloned(),
             exception,
             elapsed,

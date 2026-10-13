@@ -37,6 +37,15 @@ impl Engine {
             Ok(()) => Ok(Reply::Launched(target.absolute_program())),
             Err(e) => {
                 self.shutdown().await;
+                let program = target.absolute_program();
+                // Adapters report a missing executable obscurely, e.g. lldb-dap's
+                // "Process is in an unexpected state" from configurationDone.
+                if target.program.components().count() > 1 && !program.exists() {
+                    bail!(
+                        "{} does not exist; build it first (debugger error: {e})",
+                        program.display()
+                    );
+                }
                 Err(e)
             }
         }
@@ -228,6 +237,7 @@ impl Engine {
 
     pub(super) async fn cmd_continue(&mut self) -> Result<Reply> {
         let tid = self.require_stopped()?;
+        self.continuing = true;
         self.resumed_at = Some(Instant::now());
         let client = self.client()?;
         client
@@ -238,8 +248,10 @@ impl Engine {
     }
 
     pub(super) async fn cmd_pause(&mut self) -> Result<Reply> {
-        if !matches!(self.session.status, SessionStatus::Running) {
-            bail!(NOT_RUNNING);
+        match self.session.status {
+            SessionStatus::Running => {}
+            SessionStatus::Stopped(_) => bail!(ALREADY_STOPPED),
+            _ => bail!(NOT_RUNNING),
         }
         self.pause_pending = true;
         if let Err(e) = self.try_pause().await {
@@ -266,6 +278,7 @@ impl Engine {
 
     pub(super) async fn cmd_next(&mut self) -> Result<Reply> {
         let tid = self.require_stopped()?;
+        self.continuing = false;
         self.resumed_at = Some(Instant::now());
         self.client()?
             .request(NextArguments { thread_id: tid.0 })
@@ -276,6 +289,7 @@ impl Engine {
 
     pub(super) async fn cmd_step(&mut self) -> Result<Reply> {
         let tid = self.require_stopped()?;
+        self.continuing = false;
         self.resumed_at = Some(Instant::now());
         self.client()?
             .request(StepInArguments { thread_id: tid.0 })
@@ -286,6 +300,7 @@ impl Engine {
 
     pub(super) async fn cmd_finish(&mut self) -> Result<Reply> {
         let tid = self.require_stopped()?;
+        self.continuing = false;
         self.resumed_at = Some(Instant::now());
         self.client()?
             .request(StepOutArguments { thread_id: tid.0 })

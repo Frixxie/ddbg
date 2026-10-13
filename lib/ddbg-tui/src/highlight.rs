@@ -24,9 +24,7 @@ static THEME: LazyLock<Theme> = LazyLock::new(|| {
 /// colors and font styles are set, so the source pane's own line
 /// backgrounds (exec line, cursor) stay visible.
 pub fn highlight(path: &Path, lines: &[String]) -> Vec<StyledLine> {
-    let syntax = path
-        .extension()
-        .and_then(|e| e.to_str())
+    let syntax = ddbg_cli::highlight::syntax_extension(path)
         .and_then(|e| SYNTAXES.find_syntax_by_extension(e))
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
     let mut h = HighlightLines::new(syntax, &THEME);

@@ -6,3 +6,6 @@
 /fixtures/hello-c/*.dSYM
 __pycache__/
 /fixtures/*/.venv
+/fixtures/*/node_modules
+/fixtures/*/test-results
+/fixtures/*/playwright-report

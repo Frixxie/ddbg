@@ -8,6 +8,7 @@ pub mod protocol;
 
 pub use anyhow::Result;
 pub mod client;
+pub mod mux;
 pub mod transport;
 
 pub use client::{DapClient, Incoming};

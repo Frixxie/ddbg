@@ -18,6 +18,10 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
     "site-packages",
     "CMakeFiles",
+    "dist",
+    "build",
+    "out",
+    "coverage",
 ];
 /// Stop scanning huge trees.
 const MAX_FILES: usize = 5000;
@@ -42,7 +46,12 @@ enum Lang {
     Python,
     /// C and C++.
     C,
+    /// JavaScript and TypeScript.
+    Js,
 }
+
+/// JavaScript and TypeScript source extensions.
+pub const JS_EXTENSIONS: &[&str] = &["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"];
 
 /// Scan source files under `root`, sorted by path then line.
 pub fn discover(root: &Path) -> Vec<Function> {
@@ -102,6 +111,8 @@ fn collect_files(dir: &Path, out: &mut Vec<(PathBuf, Lang)>) {
                 Some("cs") => Lang::CSharp,
                 Some("py" | "pyw") => Lang::Python,
                 Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx") => Lang::C,
+                // Declaration files have no code to break in.
+                Some(e) if JS_EXTENSIONS.contains(&e) && !is_declaration(&name) => Lang::Js,
                 _ => continue,
             };
             out.push((path, lang));
@@ -142,13 +153,14 @@ fn scan(text: &str, lang: Lang) -> Vec<(String, String, u32)> {
             // Only top-level definitions; bodies are indented.
             Lang::C if indent == 0 => (None, c_function(line)),
             Lang::C => (None, None),
+            Lang::Js => (js_class(line), js_fn(line)),
         };
         if let Some(ty) = ty {
             types.push((indent, ty));
         } else if let Some(name) = func {
             let sep = match lang {
                 Lang::Rust | Lang::C => "::",
-                Lang::CSharp | Lang::Python => ".",
+                Lang::CSharp | Lang::Python | Lang::Js => ".",
             };
             let mut qualified: Vec<&str> = types.iter().map(|(_, t)| t.as_str()).collect();
             qualified.push(&name);
@@ -158,6 +170,97 @@ fn scan(text: &str, lang: Lang) -> Vec<(String, String, u32)> {
         }
     }
     out
+}
+
+fn is_declaration(name: &str) -> bool {
+    [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|s| name.ends_with(s))
+}
+
+/// Strip leading words such as `export`, `async` or `private`.
+fn strip_js_modifiers(mut s: &str) -> &str {
+    const MODIFIERS: &[&str] = &[
+        "export",
+        "default",
+        "declare",
+        "abstract",
+        "async",
+        "static",
+        "public",
+        "private",
+        "protected",
+        "override",
+        "readonly",
+    ];
+    while let Some(rest) = MODIFIERS.iter().find_map(|m| {
+        s.strip_prefix(m)
+            .filter(|r| r.starts_with(char::is_whitespace))
+    }) {
+        s = rest.trim_start();
+    }
+    s
+}
+
+fn js_class(line: &str) -> Option<String> {
+    let rest = strip_js_modifiers(line).strip_prefix("class ")?;
+    ident(rest.trim_start()).map(str::to_owned)
+}
+
+/// Words that look like `word (` but are not method declarations.
+const JS_STATEMENTS: &[&str] = &[
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "return",
+    "function",
+    "await",
+    "new",
+    "typeof",
+    "super",
+    "throw",
+    "yield",
+    "delete",
+    "void",
+    "constructor",
+];
+
+/// `function name(`, `const name = (…) =>`, `const name = function` or a
+/// class method `name(…) {`.
+fn js_fn(line: &str) -> Option<String> {
+    let s = strip_js_modifiers(line);
+    if let Some(rest) = s.strip_prefix("function") {
+        let rest = rest.trim_start_matches('*').trim_start();
+        return ident(rest).map(str::to_owned);
+    }
+    for kw in ["const ", "let ", "var "] {
+        if let Some(rest) = s.strip_prefix(kw) {
+            let name = ident(rest.trim_start())?;
+            let value = rest.split_once('=')?.1.trim_start();
+            let value = value.strip_prefix("async").unwrap_or(value).trim_start();
+            let is_fn = value.starts_with("function")
+                || (value.contains("=>") && (value.starts_with('(') || value.starts_with('<')))
+                || ident(value).is_some_and(|p| value[p.len()..].trim_start().starts_with("=>"));
+            return is_fn.then(|| name.to_owned());
+        }
+    }
+    // Methods: `[get|set|*]name[<T>](…)[: T] {`.
+    if !line.trim_end().ends_with('{') {
+        return None;
+    }
+    let s = s
+        .strip_prefix("get ")
+        .or_else(|| s.strip_prefix("set "))
+        .unwrap_or(s)
+        .trim_start_matches('*');
+    let name = ident(s)?;
+    let after = skip_generics(s[name.len()..].trim_start());
+    if !after.starts_with('(') || JS_STATEMENTS.contains(&name) {
+        return None;
+    }
+    Some(name.to_owned())
 }
 
 fn py_def(line: &str) -> Option<String> {
@@ -547,6 +650,60 @@ main(void)
                 ("bar".into(), "Foo::bar".into(), 18),
             ]
         );
+    }
+
+    #[test]
+    fn js_functions_and_classes() {
+        let src = r#"
+import { x } from "./x";
+
+export async function main(): Promise<void> {
+    if (x) {
+        run();
+    }
+}
+
+function* gen() {}
+
+export const add = (a: number, b: number): number => a + b;
+const inc = async x => x + 1;
+const value = compute(1);
+
+export default class Counter<T> {
+    private count = 0;
+
+    constructor() {}
+
+    async increment(by: number): Promise<number> {
+        for (const i of []) {
+        }
+        return this.count;
+    }
+
+    get total(): number {
+        return 0;
+    }
+}
+"#;
+        assert_eq!(
+            names(src, Lang::Js),
+            vec![
+                ("main".into(), 4),
+                ("gen".into(), 10),
+                ("add".into(), 12),
+                ("inc".into(), 13),
+                ("Counter.increment".into(), 21),
+                ("Counter.total".into(), 27),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_source_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/hello-node");
+        let files = source_files(&root);
+        assert!(files.contains(&root.join("src/main.ts")), "{files:?}");
+        assert!(!files.iter().any(|f| f.to_string_lossy().contains(".d.")));
     }
 
     #[test]

@@ -2,14 +2,18 @@
 //! generic [`DebugTarget`](crate::target::DebugTarget) into its launch/attach
 //! arguments. Intentionally small.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ddbg_dap::AdapterCommand;
-use ddbg_dap::transport::find_program;
+use ddbg_dap::transport::{connect_tcp, find_program};
+use ddbg_dap::{AdapterCommand, AdapterProcess, mux};
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::engine::Connection;
 use crate::target::{AttachTarget, LaunchTarget};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 pub trait DebugAdapter: Send + Sync {
     /// Value for `initialize.adapterID`.
@@ -21,6 +25,17 @@ pub trait DebugAdapter: Send + Sync {
     fn build_launch_request(&self, target: &LaunchTarget) -> Result<Value>;
 
     fn build_attach_request(&self, target: &AttachTarget) -> Result<Value>;
+
+    /// Start the adapter and connect to it. By default the adapter is
+    /// spawned and spoken to over stdio.
+    fn connect(&self) -> Result<Connection> {
+        let proc = AdapterProcess::spawn(&self.command()?)?;
+        Ok(Connection {
+            client: proc.client,
+            incoming: proc.incoming,
+            child: Some(proc.child),
+        })
+    }
 }
 
 fn resolve(program: &str, args: &[String]) -> Result<AdapterCommand> {
@@ -41,7 +56,12 @@ pub fn adapter_for_command(program: &str, args: Vec<String>) -> Box<dyn DebugAda
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if name.starts_with("netcoredbg") {
+    if is_js_debug_command(program, &name) {
+        Box::new(JsDebugAdapter {
+            program: program.to_owned(),
+            args,
+        })
+    } else if name.starts_with("netcoredbg") {
         let default = NetCoreDbgAdapter::default();
         Box::new(NetCoreDbgAdapter {
             program: program.to_owned(),
@@ -407,6 +427,230 @@ impl DebugAdapter for DebugpyAdapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// js-debug
+// ---------------------------------------------------------------------------
+
+const JS_DEBUG_SERVER: &str = "dapDebugServer.js";
+const JS_DEBUG_LAUNCHERS: [&str; 2] = ["js-debug-adapter", "js-debug-dap"];
+const JS_DEBUG_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn is_js_debug_command(program: &str, name: &str) -> bool {
+    JS_DEBUG_LAUNCHERS
+        .iter()
+        .any(|l| name == *l || name == format!("{l}{}", std::env::consts::EXE_SUFFIX))
+        || name.starts_with("node")
+        || program.ends_with(".js")
+}
+
+/// JavaScript and TypeScript (Node.js) via js-debug's DAP server
+/// (`dapDebugServer.js` from the vscode-js-debug `js-debug-dap` release).
+///
+/// js-debug listens on TCP and starts a child session per debuggee process
+/// (`startDebugging`), which [`mux`] combines into one connection.
+#[derive(Debug, Clone)]
+pub struct JsDebugAdapter {
+    /// A launcher in PATH (`js-debug-adapter`), the path to
+    /// `dapDebugServer.js`, or `node` with the script as first argument.
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Default for JsDebugAdapter {
+    fn default() -> Self {
+        Self {
+            program: JS_DEBUG_LAUNCHERS[0].into(),
+            args: Vec::new(),
+        }
+    }
+}
+
+/// Where common tools install js-debug's DAP server.
+fn js_debug_server_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("DDBG_JS_DEBUG") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/share/ddbg/js-debug"));
+        dirs.push(home.join(".local/share/nvim/mason/packages/js-debug-adapter/js-debug"));
+    }
+    dirs.into_iter()
+        .flat_map(|d| {
+            [
+                d.join("src").join(JS_DEBUG_SERVER),
+                d.join(JS_DEBUG_SERVER),
+                d,
+            ]
+        })
+        .collect()
+}
+
+impl JsDebugAdapter {
+    fn resolve_command(&self) -> Result<AdapterCommand> {
+        let node = || find_program("node").ok_or_else(|| anyhow!("node was not found in PATH"));
+        let default = self.program == JS_DEBUG_LAUNCHERS[0] && self.args.is_empty();
+        if self.program.ends_with(".js") {
+            return Ok(AdapterCommand {
+                program: path_str(&node()?),
+                args: [vec![self.program.clone()], self.args.clone()].concat(),
+            });
+        }
+        if let Ok(cmd) = resolve(&self.program, &self.args) {
+            return Ok(cmd);
+        }
+        if default {
+            if let Some(path) = JS_DEBUG_LAUNCHERS[1..].iter().find_map(|l| find_program(l)) {
+                return Ok(AdapterCommand::new(path_str(&path)));
+            }
+            if let Some(server) = js_debug_server_candidates()
+                .into_iter()
+                .find(|p| p.is_file() && p.ends_with(JS_DEBUG_SERVER))
+            {
+                return Ok(AdapterCommand {
+                    program: path_str(&node()?),
+                    args: vec![path_str(&server)],
+                });
+            }
+            bail!(
+                "js-debug was not found. Download js-debug-dap-*.tar.gz from \
+                 https://github.com/microsoft/vscode-js-debug/releases and extract it to \
+                 ~/.local/share/ddbg (or set DDBG_JS_DEBUG to its directory), or pass \
+                 --adapter \"node /path/to/js-debug/src/{JS_DEBUG_SERVER}\""
+            );
+        }
+        resolve(&self.program, &self.args)
+    }
+}
+
+/// `Debug server listening at 127.0.0.1:53111`
+fn js_debug_listen_address(line: &str) -> Option<String> {
+    let addr = line.split("listening at").nth(1)?.trim();
+    let (host, port) = addr.rsplit_once(':')?;
+    port.parse::<u16>().ok()?;
+    Some(if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    })
+}
+
+/// Start the js-debug server and return how to open connections to it.
+/// The server process lives as long as the returned connector.
+async fn start_js_debug(cmd: AdapterCommand) -> Result<mux::Connect> {
+    let mut child = tokio::process::Command::new(&cmd.program)
+        .args(&cmd.args)
+        .args(["0", "127.0.0.1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to spawn adapter `{}`", cmd.program))?;
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "dap::stderr", "{line}");
+            }
+        });
+    }
+    let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+    let addr = tokio::time::timeout(JS_DEBUG_STARTUP_TIMEOUT, async {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(addr) = js_debug_listen_address(&line) {
+                return Ok(addr);
+            }
+            tracing::debug!(target: "dap::stdout", "{line}");
+        }
+        bail!("js-debug exited before it started listening")
+    })
+    .await
+    .map_err(|_| anyhow!("js-debug did not start listening"))??;
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(target: "dap::stdout", "{line}");
+        }
+    });
+    let server = Arc::new(child);
+    Ok(Arc::new(move || {
+        let _ = &server;
+        let addr = addr.clone();
+        Box::pin(async move { connect_tcp(&addr).await }) as mux::ConnectFuture
+    }))
+}
+
+const JS_EXTENSIONS: [&str; 8] = ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
+
+impl DebugAdapter for JsDebugAdapter {
+    fn id(&self) -> &str {
+        "pwa-node"
+    }
+
+    fn command(&self) -> Result<AdapterCommand> {
+        self.resolve_command()
+    }
+
+    fn connect(&self) -> Result<Connection> {
+        let cmd = self.command()?;
+        let (client, incoming) = mux::spawn(start_js_debug(cmd));
+        Ok(Connection {
+            client,
+            incoming,
+            child: None,
+        })
+    }
+
+    fn build_launch_request(&self, t: &LaunchTarget) -> Result<Value> {
+        let mut v = json!({
+            "name": "ddbg",
+            "type": "pwa-node",
+            "request": "launch",
+            "cwd": path_str(&t.cwd),
+            "env": t.env,
+            "stopOnEntry": t.stop_on_entry,
+            "console": "internalConsole",
+            "outputCapture": "std",
+            "sourceMaps": true,
+            "autoAttachChildProcesses": true,
+            "skipFiles": ["<node_internals>/**"],
+        });
+        // Scripts run with node; anything else (npx, a node_modules/.bin
+        // launcher) is started directly, and js-debug attaches to every
+        // Node.js process it spawns.
+        let script = t
+            .program
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| JS_EXTENSIONS.contains(&e));
+        if script {
+            v["program"] = json!(path_str(&t.absolute_program()));
+            v["args"] = json!(t.args);
+        } else {
+            let exe = if t.program.components().count() > 1 {
+                path_str(&t.absolute_program())
+            } else {
+                path_str(&t.program)
+            };
+            v["runtimeExecutable"] = json!(exe);
+            v["runtimeArgs"] = json!(t.args);
+        }
+        Ok(v)
+    }
+
+    fn build_attach_request(&self, t: &AttachTarget) -> Result<Value> {
+        Ok(json!({
+            "name": "ddbg",
+            "type": "pwa-node",
+            "request": "attach",
+            "processId": t.pid.to_string(),
+            "sourceMaps": true,
+            "skipFiles": ["<node_internals>/**"],
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +766,58 @@ mod tests {
             "debugpy"
         );
         assert_eq!(adapter_for_command("uv", vec![]).id(), "debugpy");
+        assert_eq!(
+            adapter_for_command("js-debug-adapter", vec![]).id(),
+            "pwa-node"
+        );
+        assert_eq!(
+            adapter_for_command("node", vec!["dapDebugServer.js".into()]).id(),
+            "pwa-node"
+        );
+        assert_eq!(
+            adapter_for_command("/opt/js-debug/src/dapDebugServer.js", vec![]).id(),
+            "pwa-node"
+        );
+    }
+
+    #[test]
+    fn js_debug_launch_arguments() {
+        let a = JsDebugAdapter::default();
+        let mut t = target();
+        t.program = "src/main.ts".into();
+        let v = a.build_launch_request(&t).unwrap();
+        assert_eq!(v["type"], "pwa-node");
+        assert_eq!(v["program"], "/proj/src/main.ts");
+        assert_eq!(v["args"], json!(["--x"]));
+        assert_eq!(v["env"], json!({"RUST_LOG": "debug"}));
+        assert!(v.get("runtimeExecutable").is_none());
+
+        // Launchers run directly; js-debug follows the Node.js processes.
+        t.program = "npx".into();
+        t.args = vec!["vitest".into(), "run".into()];
+        let v = a.build_launch_request(&t).unwrap();
+        assert_eq!(v["runtimeExecutable"], "npx");
+        assert_eq!(v["runtimeArgs"], json!(["vitest", "run"]));
+        assert!(v.get("program").is_none());
+        t.program = "node_modules/.bin/vitest".into();
+        let v = a.build_launch_request(&t).unwrap();
+        assert_eq!(v["runtimeExecutable"], "/proj/node_modules/.bin/vitest");
+
+        let v = a.build_attach_request(&AttachTarget { pid: 42 }).unwrap();
+        assert_eq!(v["processId"], "42");
+    }
+
+    #[test]
+    fn js_debug_listen_address_is_parsed() {
+        assert_eq!(
+            js_debug_listen_address("Debug server listening at 127.0.0.1:53111").as_deref(),
+            Some("127.0.0.1:53111")
+        );
+        assert_eq!(
+            js_debug_listen_address("Debug server listening at ::1:9229").as_deref(),
+            Some("[::1]:9229")
+        );
+        assert_eq!(js_debug_listen_address("starting"), None);
     }
 
     #[test]

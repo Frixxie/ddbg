@@ -107,7 +107,7 @@ fn start_location(test: &TestCase) -> Location {
 
 fn pick_index(listed: &[TestCase], n: usize) -> anyhow::Result<TestCase> {
     if listed.is_empty() {
-        bail!("no tests listed; run `tests` first");
+        bail!("no tests listed; list tests first, or select a test by name");
     }
     n.checked_sub(1)
         .and_then(|i| listed.get(i))

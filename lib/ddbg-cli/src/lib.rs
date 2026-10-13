@@ -4,7 +4,7 @@ mod adapter_test;
 mod args;
 pub mod commands;
 pub mod functions;
-mod highlight;
+pub mod highlight;
 mod logging;
 pub mod output;
 pub mod parser;
@@ -17,12 +17,15 @@ use std::sync::Arc;
 
 pub use clap::Parser;
 use ddbg_core::adapter::{
-    DebugAdapter, DebugpyAdapter, LldbDapAdapter, NetCoreDbgAdapter, adapter_for_command,
+    DebugAdapter, DebugpyAdapter, JsDebugAdapter, LldbDapAdapter, NetCoreDbgAdapter,
+    adapter_for_command,
 };
 use ddbg_core::command::Command;
 use ddbg_core::{AttachTarget, EngineConfig, LaunchTarget, engine};
 use ddbg_project::{Project, ProjectKind, PythonLauncher};
-use ddbg_test::{AnyProvider, DotNetTestProvider, PythonTestProvider, RustTestProvider};
+use ddbg_test::{
+    AnyProvider, DotNetTestProvider, NodeTestProvider, PythonTestProvider, RustTestProvider,
+};
 
 pub use args::{Args, Subcommand};
 pub use session::{Outcome, Session, TestCase};
@@ -163,7 +166,7 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
     let tests = match &test_project {
         Some(p) => {
             let provider = match p.kind {
-                ProjectKind::Rust => Some(AnyProvider::Rust(RustTestProvider::new(&p.root))),
+                ProjectKind::Rust => Some(AnyProvider::Rust(rust_test_provider(&p.root, &cwd))),
                 ProjectKind::DotNet => Some(AnyProvider::DotNet(DotNetTestProvider::new(&p.root))),
                 ProjectKind::Python => {
                     let mut provider = PythonTestProvider::new(&p.root);
@@ -187,6 +190,7 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
                     }
                     Some(AnyProvider::Python(provider))
                 }
+                ProjectKind::Node => Some(AnyProvider::Node(NodeTestProvider::new(&p.root))),
                 ProjectKind::C => None,
             };
             let msg = format!(
@@ -211,6 +215,24 @@ pub fn prepare(args: &Args, cwd: std::path::PathBuf) -> anyhow::Result<Prepared>
         project: test_project.map(|p| p.kind),
         notes,
     })
+}
+
+/// Tests for the package the user is standing in, rather than the whole
+/// workspace, so unrelated members need not build.
+fn rust_test_provider(root: &std::path::Path, cwd: &std::path::Path) -> RustTestProvider {
+    let provider = RustTestProvider::new(root);
+    let manifest = cwd
+        .ancestors()
+        .take_while(|d| d.starts_with(root))
+        .map(|d| d.join("Cargo.toml"))
+        .find(|m| m.is_file());
+    match manifest {
+        Some(m) if m.parent() != Some(root) => provider.with_cargo_args(vec![
+            "--manifest-path".to_owned(),
+            m.to_string_lossy().into_owned(),
+        ]),
+        _ => provider,
+    }
 }
 
 /// For .NET assemblies, run from the project directory with the environment
@@ -238,6 +260,7 @@ fn kind_of_target(t: &LaunchTarget) -> Option<ProjectKind> {
     match t.program.extension()?.to_str()? {
         "dll" => Some(ProjectKind::DotNet),
         "py" | "pyw" => Some(ProjectKind::Python),
+        _ if ddbg_project::is_node_script(&t.program) => Some(ProjectKind::Node),
         _ => None,
     }
 }
@@ -253,6 +276,7 @@ fn default_adapter(kind: Option<&ProjectKind>, root: &std::path::Path) -> Arc<dy
                 DebugpyAdapter::with_python(python.to_string_lossy())
             }
         }),
+        Some(ProjectKind::Node) => Arc::new(JsDebugAdapter::default()),
         Some(ProjectKind::C) => Arc::new(LldbDapAdapter::default()),
         Some(ProjectKind::Rust) | None => Arc::new(LldbDapAdapter::for_rust()),
     }
@@ -287,7 +311,7 @@ fn discover_target(project: &Project, notes: &mut Vec<String>) -> Option<LaunchT
             ProjectKind::Rust => " (not built yet; run `cargo build`)",
             ProjectKind::DotNet => " (not built yet; run `dotnet build`)",
             ProjectKind::C => " (not built yet)",
-            ProjectKind::Python => " (not found)",
+            ProjectKind::Python | ProjectKind::Node => " (not found)",
         }
     };
     notes.push(format!(

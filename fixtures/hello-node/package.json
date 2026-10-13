@@ -1,0 +1,14 @@
+{
+  "name": "hello-node",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "vitest": "^3.2.0"
+  }
+}

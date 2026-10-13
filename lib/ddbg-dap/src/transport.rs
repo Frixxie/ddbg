@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use crate::client::{DapClient, Incoming};
+use crate::client::{DapClient, Incoming, RawIncoming};
 use anyhow::{Context, Result, bail};
 
 /// How to start a debug adapter process.
@@ -71,6 +71,16 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Connect to an adapter listening on a TCP address (`host:port`).
+pub async fn connect_tcp(addr: &str) -> Result<(DapClient, mpsc::UnboundedReceiver<RawIncoming>)> {
+    let stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("failed to connect to debug adapter at {addr}"))?;
+    stream.set_nodelay(true)?;
+    let (r, w) = stream.into_split();
+    Ok(DapClient::connect_raw(r, w))
 }
 
 /// A running adapter process plus its DAP connection.

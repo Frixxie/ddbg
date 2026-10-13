@@ -4,7 +4,8 @@ A terminal-first, language-agnostic debugger with first-class test debugging,
 built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
 
 > Status: early. Program and test debugging work for Rust (`lldb-dap`), Python
-> with pytest (`debugpy`) and, experimentally, .NET xUnit v3 on
+> with pytest (`debugpy`), JavaScript/TypeScript with Vitest and Playwright
+> Test (`js-debug`) and, experimentally, .NET xUnit v3 on
 > Microsoft.Testing.Platform (`netcoredbg`). Program debugging (no test
 > discovery yet) works for C/C++ (`lldb-dap`).
 
@@ -22,10 +23,21 @@ built on the Debug Adapter Protocol (DAP). See [DESIGN.md](DESIGN.md).
     uv projects (`uv.lock` or a `[tool.uv]` table in `pyproject.toml`) instead
     use `uv run --with debugpy --with pytest python -m debugpy.adapter` when
     `uv` is on `PATH`, so neither needs to be installed in the project.
+  - **JavaScript / TypeScript:** Node.js and js-debug's DAP server. Download
+    `js-debug-dap-*.tar.gz` from the
+    [vscode-js-debug releases](https://github.com/microsoft/vscode-js-debug/releases)
+    and extract it to `~/.local/share/ddbg` (giving
+    `~/.local/share/ddbg/js-debug/src/dapDebugServer.js`), or set
+    `DDBG_JS_DEBUG` to the extracted `js-debug` directory. A
+    `js-debug-adapter` launcher on `PATH` (e.g. installed by Mason) also
+    works, as does `--adapter "node /path/to/dapDebugServer.js"`. TypeScript
+    runs with Node.js's built-in type stripping (Node.js 22.18+), or through
+    the test runner's own transform; source maps are followed.
 
 The adapter is picked from the detected project (`Cargo.toml`, `*.csproj`,
-`pyproject.toml`/`setup.py`/`requirements.txt`, `CMakeLists.txt`/`Makefile`/
-`meson.build`) or, for `ddbg -- <program>`, from its extension (`.dll`, `.py`).
+`pyproject.toml`/`setup.py`/`requirements.txt`, `package.json`,
+`CMakeLists.txt`/`Makefile`/`meson.build`) or, for `ddbg -- <program>`, from
+its extension (`.dll`, `.py`, `.js`/`.mjs`/`.cjs`/`.ts`/`.mts`/`.cts`).
 Use `ddbg -- -m package.module` to debug a Python module. `--adapter` overrides
 the choice, e.g. `--adapter ".venv/bin/python -m debugpy.adapter"`.
 
@@ -289,8 +301,9 @@ they are evaluated automatically. Watch IDs are separate from breakpoint IDs.
 
 ### Tests
 
-Inside a Cargo, .NET or Python project, `tests` builds the test executables (or
-collects pytest node IDs) and lists them;
+Inside a Cargo, .NET, Python or Node.js project, `tests` builds the test
+executables (or collects pytest node IDs, or Vitest and Playwright tests) and
+lists them;
 `test-run` and `test-debug` take a number from that list or a name:
 
 ```console
@@ -309,6 +322,17 @@ the project's virtualenv (`$VIRTUAL_ENV`, `.venv`, `venv` or `env`) or `python3`
 An `--adapter` starting with `uv` or `python…` selects the launcher too. A
 plain interpreter needs `pytest`, and `debugpy` for `test-debug`. Tests are named by node ID, e.g.
 `tests/test_main.py::test_adds`.
+
+Node.js tests come from Vitest and Playwright Test when the package depends on
+them, using the runners installed in `node_modules` (run `npm install` first).
+Tests are named by file and title, e.g.
+`tests/math.test.ts > points > adds points`, and selected by `file:line`.
+`test-debug` runs one worker without test timeouts (`--no-file-parallelism
+--testTimeout=0`, `--workers=1 --timeout=0`), so time spent paused does not fail
+the test; js-debug attaches to the runner's worker processes automatically.
+js-debug reports no exit code, so a finished run ends as terminated, and the
+debug-test result comes from the runner's summary. Vitest reports the tests
+excluded by the selection as skipped; those are not counted.
 
 .NET support covers xUnit v3 test projects on Microsoft.Testing.Platform
 (`<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>`).
@@ -474,6 +498,13 @@ have `debugpy`; the pytest regression also needs `pytest` and skips without it):
 cargo test -p ddbg-core -p ddbg-driver -- --ignored
 ```
 
+The js-debug regressions need Node.js 22.18+, js-debug (see Requirements) and
+`npm install` in `fixtures/hello-node`; they skip otherwise:
+
+```console
+cargo test -p ddbg-driver --test js_debug --locked -- --ignored
+```
+
 The driver's .NET regression also requires SDK 10 and `netcoredbg` on PATH:
 
 ```console
@@ -490,4 +521,4 @@ cargo test -p ddbg-driver --test netcoredbg --locked -- --ignored
 | `lib/ddbg-tui` | Full-screen terminal UI (ratatui) |
 | `lib/ddbg-driver` | Programmatic driver: run REPL commands from code (typed or text), for tests and scripting |
 | `bin/ddbg` | The `ddbg` binary |
-| `lib/ddbg-project` | Project detection (Cargo, .NET, Python, C/C++) |
+| `lib/ddbg-project` | Project detection (Cargo, .NET, Python, Node.js, C/C++) |

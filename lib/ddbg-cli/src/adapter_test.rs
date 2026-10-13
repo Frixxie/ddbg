@@ -3,20 +3,18 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use ddbg_core::adapter::adapter_for_command;
 use ddbg_dap::protocol::{DisconnectArguments, InitializeArguments};
-use ddbg_dap::{AdapterCommand, AdapterProcess};
 
 pub async fn run(adapter: &[String]) -> anyhow::Result<()> {
     let (program, args) = adapter.split_first().context("missing adapter command")?;
-    let mut cmd = AdapterCommand::new(program.as_str());
-    cmd.args = args.to_vec();
-    let cmd = cmd.resolve()?;
-    println!("adapter: {}", cmd.program);
+    let adapter = adapter_for_command(program, args.to_vec());
+    println!("adapter: {}", adapter.command()?.program);
 
-    let mut proc = AdapterProcess::spawn(&cmd)?;
+    let mut conn = adapter.connect()?;
     let caps = tokio::time::timeout(
         Duration::from_secs(10),
-        proc.client.request(InitializeArguments::new("ddbg")),
+        conn.client.request(InitializeArguments::new(adapter.id())),
     )
     .await
     .context("initialize timed out")??;
@@ -43,9 +41,11 @@ pub async fn run(adapter: &[String]) -> anyhow::Result<()> {
 
     let _ = tokio::time::timeout(
         Duration::from_secs(2),
-        proc.client.request(DisconnectArguments::default()),
+        conn.client.request(DisconnectArguments::default()),
     )
     .await;
-    let _ = proc.child.kill().await;
+    if let Some(child) = conn.child.as_mut() {
+        let _ = child.kill().await;
+    }
     Ok(())
 }

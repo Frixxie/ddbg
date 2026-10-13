@@ -55,14 +55,15 @@ impl RustTestProvider {
 
     /// Build all test executables and return them.
     pub async fn build(&self) -> anyhow::Result<Vec<TestBinary>> {
-        let out = Command::new("cargo")
-            .args(["test", "--no-run", "--message-format=json"])
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "--no-run", "--message-format=json"])
             .args(&self.cargo_args)
             .current_dir(&self.root)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .context("failed to run cargo")?;
+            .stdin(Stdio::null());
+        if self.use_sqlx_offline() {
+            cmd.env("SQLX_OFFLINE", "true");
+        }
+        let out = cmd.output().await.context("failed to run cargo")?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() {
             let errors = compiler_errors(&stdout);
@@ -77,6 +78,24 @@ impl RustTestProvider {
             );
         }
         Ok(parse_build_output(&stdout))
+    }
+
+    /// sqlx macros check queries against a live database unless
+    /// `SQLX_OFFLINE` is set; prefer the cached `.sqlx/` query data, so
+    /// test discovery works without the database running.
+    fn use_sqlx_offline(&self) -> bool {
+        if std::env::var_os("SQLX_OFFLINE").is_some() {
+            return false;
+        }
+        let manifest_dir = self
+            .cargo_args
+            .iter()
+            .position(|a| a == "--manifest-path")
+            .and_then(|i| self.cargo_args.get(i + 1))
+            .and_then(|m| Path::new(m).parent().map(Path::to_path_buf));
+        std::iter::once(self.root.clone())
+            .chain(manifest_dir)
+            .any(|d| d.join(".sqlx").is_dir())
     }
 
     async fn list(&self, bin: &TestBinary) -> anyhow::Result<Vec<String>> {

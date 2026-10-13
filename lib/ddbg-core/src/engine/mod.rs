@@ -16,7 +16,7 @@ use ddbg_dap::protocol::{
     SetExpressionArguments, SetVariableArguments, StackTraceArguments, StepInArguments,
     StepOutArguments, ThreadsArguments, VariablesArguments,
 };
-use ddbg_dap::{AdapterProcess, DapClient, Incoming};
+use ddbg_dap::{DapClient, Incoming};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -26,8 +26,8 @@ use crate::command::{Command, Completion, FrameSelector, Location, Reply, ScopeV
 use anyhow::{Result, anyhow, bail};
 
 use crate::error::{
-    NO_CONDITIONAL_BREAKPOINTS, NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD, NOT_RUNNING,
-    NOT_STOPPED,
+    ALREADY_STOPPED, NO_CONDITIONAL_BREAKPOINTS, NO_FUNCTION_BREAKPOINTS, NO_TARGET, NO_THREAD,
+    NOT_RUNNING, NOT_STOPPED,
 };
 use crate::event::{DebugEvent, ExceptionInfo, Output, StopInfo};
 use crate::session::{DebugSession, Feature, SessionStatus, StopReason};
@@ -58,14 +58,7 @@ pub struct Connection {
 pub type Connector = Box<dyn Fn(&dyn DebugAdapter) -> Result<Connection> + Send + Sync>;
 
 fn spawn_connector() -> Connector {
-    Box::new(|adapter| {
-        let proc = AdapterProcess::spawn(&adapter.command()?)?;
-        Ok(Connection {
-            client: proc.client,
-            incoming: proc.incoming,
-            child: Some(proc.child),
-        })
-    })
+    Box::new(|adapter| adapter.connect())
 }
 
 pub struct EngineConfig {
@@ -130,6 +123,7 @@ pub fn spawn_with_connector(config: EngineConfig, connector: Connector) -> Engin
         cwd: config.cwd,
         events: events.clone(),
         resumed_at: None,
+        continuing: false,
         halt: halt_tx,
         pause_pending: false,
     };
@@ -158,6 +152,8 @@ struct Engine {
     events: broadcast::Sender<DebugEvent>,
     /// When the debuggee last resumed, for timing the next stop.
     resumed_at: Option<Instant>,
+    /// The last resume was `continue`, not a step.
+    continuing: bool,
     halt: watch::Sender<Option<DebugEvent>>,
     /// A pause requested before the adapter exposes its first live thread.
     pause_pending: bool,
