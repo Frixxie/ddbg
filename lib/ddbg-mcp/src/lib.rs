@@ -337,82 +337,95 @@ impl DdbgServer {
 
     /// Run a resuming command and report how the program halted.
     async fn resume(&self, cmd: Resume, timeout_ms: Option<u64>) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
+        self.with_state(async |st| {
+            let dbg = &mut st.dbg;
+            let previous = dbg.timeout();
+            let timeout = timeout_ms.map_or(previous, Duration::from_millis);
+            dbg.set_timeout(timeout);
+            // Only report events caused by this command.
+            dbg.take_transcript();
+            let result = match cmd {
+                Resume::Run(None, args) if args.is_empty() => dbg.run().await,
+                Resume::Run(None, args) => match st.program.clone() {
+                    Some(p) => dbg.run_program(p, args).await,
+                    None => Err(anyhow::anyhow!(
+                        "no program to pass arguments to; set `program`"
+                    )),
+                },
+                Resume::Run(Some(p), args) => {
+                    st.program = Some(p.clone());
+                    dbg.run_program(p, args).await
+                }
+                Resume::Attach(pid) => dbg.attach(pid).await,
+                Resume::Continue => dbg.cont().await,
+                Resume::Next => dbg.next().await,
+                Resume::Step => dbg.step().await,
+                Resume::Finish => dbg.finish().await,
+                Resume::Pause => dbg.pause().await,
+                Resume::Wait => dbg.wait().await,
+                Resume::TestDebug(t, b) => dbg.test_debug(&t, b).await,
+            };
+            dbg.set_timeout(previous);
+            let transcript = dbg.take_transcript();
+            match result {
+                Ok(h) => {
+                    let mut value = to_value(HaltDto::from(h));
+                    if let Some(result) = dbg.debug_test_result() {
+                        value["test_result"] = to_value(DebugTestResultDto::from(result));
+                    }
+                    ok(Some(transcript), value)
+                }
+                Err(e) if e.downcast_ref::<Timeout>().is_some() => {
+                    let mut summary = transcript;
+                    if !summary.is_empty() {
+                        summary.push('\n');
+                    }
+                    summary.push_str(&format!(
+                        "The program is still running after {timeout:?}; \
+                         call `wait` to keep waiting or `pause` to interrupt it."
+                    ));
+                    let mut value = to_value(HaltDto::Running {
+                        timeout_ms: timeout.as_millis() as u64,
+                    });
+                    if let Some(result) = dbg.debug_test_result() {
+                        value["test_result"] = to_value(DebugTestResultDto::from(result));
+                    }
+                    ok(Some(summary), value)
+                }
+                Err(e) => fail(e),
+            }
+        })
+        .await
+    }
+
+    /// Run `f` on the session, waiting for any call that holds it.
+    async fn with_state(&self, f: impl AsyncFnOnce(&mut State) -> ToolResult) -> ToolResult {
+        match self.state.lock().await.as_mut() {
+            Some(st) => f(st).await,
+            None => no_session(),
+        }
+    }
+
+    /// Send `cmd` through the separate engine handle, which stays usable
+    /// while a resuming call holds the session.
+    async fn interrupt(&self, cmd: Command, done: &str) -> ToolResult {
+        let Some(engine) = self.engine() else {
             return no_session();
         };
-        let dbg = &mut st.dbg;
-        let previous = dbg.timeout();
-        let timeout = timeout_ms.map_or(previous, Duration::from_millis);
-        dbg.set_timeout(timeout);
-        // Only report events caused by this command.
-        dbg.take_transcript();
-        let result = match cmd {
-            Resume::Run(None, args) if args.is_empty() => dbg.run().await,
-            Resume::Run(None, args) => match st.program.clone() {
-                Some(p) => dbg.run_program(p, args).await,
-                None => Err(anyhow::anyhow!(
-                    "no program to pass arguments to; set `program`"
-                )),
-            },
-            Resume::Run(Some(p), args) => {
-                st.program = Some(p.clone());
-                dbg.run_program(p, args).await
-            }
-            Resume::Attach(pid) => dbg.attach(pid).await,
-            Resume::Continue => dbg.cont().await,
-            Resume::Next => dbg.next().await,
-            Resume::Step => dbg.step().await,
-            Resume::Finish => dbg.finish().await,
-            Resume::Pause => dbg.pause().await,
-            Resume::Wait => dbg.wait().await,
-            Resume::TestDebug(t, b) => dbg.test_debug(&t, b).await,
-        };
-        dbg.set_timeout(previous);
-        let transcript = dbg.take_transcript();
-        match result {
-            Ok(h) => {
-                let mut value = to_value(HaltDto::from(h));
-                if let Some(result) = dbg.debug_test_result() {
-                    value["test_result"] = to_value(DebugTestResultDto::from(result));
-                }
-                ok(Some(transcript), value)
-            }
-            Err(e) if e.downcast_ref::<Timeout>().is_some() => {
-                let mut summary = transcript;
-                if !summary.is_empty() {
-                    summary.push('\n');
-                }
-                summary.push_str(&format!(
-                    "The program is still running after {timeout:?}; \
-                     call `wait` to keep waiting or `pause` to interrupt it."
-                ));
-                let mut value = to_value(HaltDto::Running {
-                    timeout_ms: timeout.as_millis() as u64,
-                });
-                if let Some(result) = dbg.debug_test_result() {
-                    value["test_result"] = to_value(DebugTestResultDto::from(result));
-                }
-                ok(Some(summary), value)
-            }
-            Err(e) => fail(e),
-        }
+        engine.execute(cmd).await.map_or_else(fail, |_| text(done))
     }
 
     /// Send a command to the engine, render the reply like the REPL, and
     /// return it with the structured value built by `structured`.
     async fn command(&self, cmd: Command, structured: impl FnOnce(Reply) -> Value) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        match st.dbg.execute(cmd.clone()).await {
+        self.with_state(async |st| match st.dbg.execute(cmd.clone()).await {
             Ok(reply) => {
                 let summary = st.dbg.renderer_mut().reply(&cmd, &reply);
                 ok(summary, structured(reply))
             }
             Err(e) => fail(e),
-        }
+        })
+        .await
     }
 }
 
@@ -538,13 +551,8 @@ impl DdbgServer {
         description = "Detach from the process, leaving it running. The session stays open. Also usable while another call waits for the process to halt."
     )]
     async fn detach(&self) -> ToolResult {
-        let Some(engine) = self.engine() else {
-            return no_session();
-        };
-        match engine.execute(Command::Detach).await {
-            Ok(_) => text("Detached; the process is left running."),
-            Err(e) => fail(e),
-        }
+        self.interrupt(Command::Detach, "Detached; the process is left running.")
+            .await
     }
 
     #[tool(
@@ -576,15 +584,12 @@ impl DdbgServer {
     )]
     async fn pause(&self, Parameters(p): Parameters<ResumeParams>) -> ToolResult {
         if self.state.try_lock().is_err() {
-            let Some(engine) = self.engine() else {
-                return no_session();
-            };
-            return match engine.execute(Command::Pause).await {
-                Ok(_) => {
-                    text("Pause requested; the pending call reports where the program stopped.")
-                }
-                Err(e) => fail(e),
-            };
+            return self
+                .interrupt(
+                    Command::Pause,
+                    "Pause requested; the pending call reports where the program stopped.",
+                )
+                .await;
         }
         self.resume(Resume::Pause, p.timeout_ms).await
     }
@@ -600,22 +605,12 @@ impl DdbgServer {
     #[tool(description = "Terminate the program. The session stays open for another `run`.")]
     async fn kill(&self) -> ToolResult {
         if self.state.try_lock().is_err() {
-            let Some(engine) = self.engine() else {
-                return no_session();
-            };
-            return match engine.execute(Command::Kill).await {
-                Ok(_) => text("Killed; the pending call reports the exit."),
-                Err(e) => fail(e),
-            };
+            return self
+                .interrupt(Command::Kill, "Killed; the pending call reports the exit.")
+                .await;
         }
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        match st.dbg.kill().await {
-            Ok(()) => text("Killed."),
-            Err(e) => fail(e),
-        }
+        self.with_state(async |st| st.dbg.kill().await.map_or_else(fail, |()| text("Killed.")))
+            .await
     }
 
     #[tool(
@@ -733,38 +728,33 @@ impl DdbgServer {
         frame indexes stay valid for `select_frame`."
     )]
     async fn backtrace(&self, Parameters(p): Parameters<BacktraceParams>) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        let cmd = Command::Backtrace;
-        let reply = match st.dbg.execute(cmd.clone()).await {
-            Ok(r) => r,
-            Err(e) => return fail(e),
-        };
         if p.all {
-            let summary = st.dbg.renderer_mut().reply(&cmd, &reply);
-            let Reply::Backtrace { frames, selected } = reply else {
-                return ok(None, unexpected(reply));
-            };
-            let frames: Vec<_> = frames
-                .into_iter()
-                .enumerate()
-                .map(|(i, f)| FrameDto::new(Some(i), f))
-                .collect();
-            return ok(
-                summary,
-                serde_json::json!({ "selected": selected, "frames": frames }),
-            );
+            return self
+                .command(Command::Backtrace, |r| match r {
+                    Reply::Backtrace { frames, selected } => serde_json::json!({
+                        "selected": selected,
+                        "frames": frames
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, f)| FrameDto::new(Some(i), f))
+                            .collect::<Vec<_>>(),
+                    }),
+                    other => unexpected(other),
+                })
+                .await;
         }
-        let Reply::Backtrace { frames, selected } = reply else {
-            return ok(None, unexpected(reply));
-        };
-        let bt = backtrace::local_backtrace(frames, selected, std::path::Path::exists);
-        ok(
-            Some(bt.summary),
-            serde_json::json!({ "selected": selected, "frames": bt.shown, "hidden": bt.hidden }),
-        )
+        self.with_state(async |st| match st.dbg.execute(Command::Backtrace).await {
+            Ok(Reply::Backtrace { frames, selected }) => {
+                let bt = backtrace::local_backtrace(frames, selected, std::path::Path::exists);
+                ok(
+                    Some(bt.summary),
+                    serde_json::json!({ "selected": selected, "frames": bt.shown, "hidden": bt.hidden }),
+                )
+            }
+            Ok(other) => ok(None, unexpected(other)),
+            Err(e) => fail(e),
+        })
+        .await
     }
 
     #[tool(description = "List threads.")]
@@ -857,11 +847,7 @@ impl DdbgServer {
 
     #[tool(description = "Discover tests in the project (Rust, .NET and Python/pytest).")]
     async fn list_tests(&self, Parameters(p): Parameters<ListTestsParams>) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        match st.dbg.tests(p.filter.as_deref()).await {
+        self.with_state(async |st| match st.dbg.tests(p.filter.as_deref()).await {
             Ok(tests) => ok(
                 Some(render_list(&tests)),
                 serde_json::json!({
@@ -873,19 +859,14 @@ impl DdbgServer {
                 }),
             ),
             Err(e) => fail(e),
-        }
+        })
+        .await
     }
 
     #[tool(description = "Run a test without the debugger and return its result and output.")]
     async fn run_test(&self, Parameters(p): Parameters<TestParams>) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        match st.dbg.test_run(&p.test).await {
-            Ok(t) => text(t),
-            Err(e) => fail(e),
-        }
+        self.with_state(async |st| st.dbg.test_run(&p.test).await.map_or_else(fail, text))
+            .await
     }
 
     #[tool(
@@ -898,21 +879,20 @@ impl DdbgServer {
 
     #[tool(description = "Return program stdout and stderr received since the previous call.")]
     async fn get_output(&self) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        let stdout = st.dbg.stdout()[st.stdout_seen..].to_owned();
-        st.stdout_seen += stdout.len();
-        let stderr = st.dbg.stderr()[st.stderr_seen..].to_owned();
-        st.stderr_seen += stderr.len();
-        let stdout = st.stdout_plain.push(&stdout);
-        let stderr = st.stderr_plain.push(&stderr);
-        let mut value = serde_json::json!({ "stdout": stdout, "stderr": stderr });
-        if let Some(result) = st.dbg.debug_test_result() {
-            value["test_result"] = to_value(DebugTestResultDto::from(result));
-        }
-        ok(None, value)
+        self.with_state(async |st| {
+            let stdout = st.dbg.stdout()[st.stdout_seen..].to_owned();
+            st.stdout_seen += stdout.len();
+            let stderr = st.dbg.stderr()[st.stderr_seen..].to_owned();
+            st.stderr_seen += stderr.len();
+            let stdout = st.stdout_plain.push(&stdout);
+            let stderr = st.stderr_plain.push(&stderr);
+            let mut value = serde_json::json!({ "stdout": stdout, "stderr": stderr });
+            if let Some(result) = st.dbg.debug_test_result() {
+                value["test_result"] = to_value(DebugTestResultDto::from(result));
+            }
+            ok(None, value)
+        })
+        .await
     }
 
     #[tool(
@@ -920,14 +900,8 @@ impl DdbgServer {
         anything the other tools do not cover; `help` lists commands."
     )]
     async fn repl(&self, Parameters(p): Parameters<ReplParams>) -> ToolResult {
-        let mut guard = self.state.lock().await;
-        let Some(st) = guard.as_mut() else {
-            return no_session();
-        };
-        match st.dbg.exec(&p.line).await {
-            Ok(t) => text(t),
-            Err(e) => fail(e),
-        }
+        self.with_state(async |st| st.dbg.exec(&p.line).await.map_or_else(fail, text))
+            .await
     }
 }
 
