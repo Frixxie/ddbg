@@ -317,7 +317,7 @@ impl TestCaseDto {
     pub fn new(index: usize, t: TestCase) -> Self {
         Self {
             index,
-            name: t.name,
+            name: t.id.name,
             display_name: t.display_name,
             source: t.source.as_deref().map(path),
             line: t.line,

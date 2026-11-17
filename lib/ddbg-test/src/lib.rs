@@ -65,7 +65,6 @@ pub enum ProviderData {
 /// name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TestId {
-    pub provider: ProviderId,
     /// Fully-qualified name as understood by the test harness.
     pub name: String,
     pub data: ProviderData,
@@ -74,22 +73,36 @@ pub struct TestId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestCase {
     pub id: TestId,
-    /// Fully-qualified harness name, e.g. `parser::tests::empty_input`.
-    pub name: String,
     pub display_name: String,
     pub source: Option<PathBuf>,
     pub line: Option<u32>,
     pub suite: Option<String>,
 }
 
+impl TestId {
+    pub fn provider(&self) -> ProviderId {
+        match self.data {
+            ProviderData::Rust { .. } => ProviderId::Rust,
+            ProviderData::DotNet { .. } => ProviderId::DotNet,
+            ProviderData::Python { .. } => ProviderId::Python,
+            ProviderData::Node { .. } => ProviderId::Node,
+        }
+    }
+}
+
 impl TestCase {
+    /// Fully-qualified harness name, e.g. `parser::tests::empty_input`.
+    pub fn name(&self) -> &str {
+        &self.id.name
+    }
+
     /// Name of the function implementing the test, usable as a debugger
     /// function breakpoint. Data-driven .NET tests carry their arguments
     /// in the name (`Ns.Class.Method(a: 1)`), which debuggers cannot bind.
     pub fn function_name(&self) -> &str {
-        match self.id.provider {
-            ProviderId::DotNet => dotnet::method_name(&self.name),
-            _ => &self.name,
+        match self.id.provider() {
+            ProviderId::DotNet => dotnet::method_name(self.name()),
+            _ => self.name(),
         }
     }
 }

@@ -140,7 +140,6 @@ fn debugger_with_test_output(output: &'static str) -> Debugger {
     let mut tests = ddbg_cli::testing::Tests::new(None, "fake test provider");
     tests.set_debugged(Some(ddbg_test::TestCase {
         id: ddbg_test::TestId {
-            provider: ddbg_test::ProviderId::DotNet,
             name: "Ns.Tests.Selected".into(),
             data: ddbg_test::ProviderData::DotNet {
                 assembly: "/bin/test-app".into(),
@@ -148,7 +147,6 @@ fn debugger_with_test_output(output: &'static str) -> Debugger {
                 framework: ddbg_test::dotnet::Framework::XUnitV3,
             },
         },
-        name: "Ns.Tests.Selected".into(),
         display_name: "Selected".into(),
         source: None,
         line: None,

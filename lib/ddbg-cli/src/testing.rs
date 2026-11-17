@@ -121,7 +121,7 @@ fn pick_name(found: &[TestCase], name: &str) -> anyhow::Result<TestCase> {
         [one] => Some((*one).clone()),
         _ => None,
     };
-    if let Some(t) = unique(found.iter().filter(|t| t.name == name).collect())
+    if let Some(t) = unique(found.iter().filter(|t| t.name() == name).collect())
         .or_else(|| unique(found.iter().filter(|t| t.display_name == name).collect()))
     {
         return Ok(t);
@@ -145,7 +145,7 @@ pub fn render_list(tests: &[TestCase]) -> String {
     let width = tests.len().to_string().len();
     let mut s = String::new();
     for (i, t) in tests.iter().enumerate() {
-        let _ = writeln!(s, "{:>width$}  {}", i + 1, t.name);
+        let _ = writeln!(s, "{:>width$}  {}", i + 1, t.name());
     }
     s.pop();
     s
@@ -177,12 +177,11 @@ fn render_run(run: &TestRunResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ddbg_test::{ProviderData, ProviderId, TestId};
+    use ddbg_test::{ProviderData, TestId};
 
     fn case(name: &str) -> TestCase {
         TestCase {
             id: TestId {
-                provider: ProviderId::Rust,
                 name: name.into(),
                 data: ProviderData::Rust {
                     binary: "/b".into(),
@@ -191,7 +190,6 @@ mod tests {
                     package_dir: "/p".into(),
                 },
             },
-            name: name.into(),
             display_name: name.rsplit("::").next().unwrap().into(),
             source: None,
             line: None,
@@ -202,7 +200,7 @@ mod tests {
     #[test]
     fn selects_by_index() {
         let l = [case("a::x"), case("a::y")];
-        assert_eq!(pick_index(&l, 2).unwrap().name, "a::y");
+        assert_eq!(pick_index(&l, 2).unwrap().name(), "a::y");
         assert!(pick_index(&l, 0).is_err());
         assert!(pick_index(&l, 3).is_err());
         assert!(pick_index(&[], 1).is_err());
@@ -211,9 +209,9 @@ mod tests {
     #[test]
     fn selects_by_name() {
         let l = [case("a::parse"), case("a::parse_all"), case("b::lex")];
-        assert_eq!(pick_name(&l, "a::parse").unwrap().name, "a::parse");
-        assert_eq!(pick_name(&l, "parse").unwrap().name, "a::parse");
-        assert_eq!(pick_name(&l[2..], "le").unwrap().name, "b::lex");
+        assert_eq!(pick_name(&l, "a::parse").unwrap().name(), "a::parse");
+        assert_eq!(pick_name(&l, "parse").unwrap().name(), "a::parse");
+        assert_eq!(pick_name(&l[2..], "le").unwrap().name(), "b::lex");
         assert!(pick_name(&l[..2], "pars").is_err());
         assert!(pick_name(&[], "x").is_err());
     }
@@ -222,7 +220,6 @@ mod tests {
     fn dotnet_theory_starts_at_method() {
         let name = "Ns.C.AddsMany(a: 1, b: 1, expected: 2)";
         let mut t = case(name);
-        t.id.provider = ProviderId::DotNet;
         t.id.data = ProviderData::DotNet {
             assembly: "/a.dll".into(),
             project: "/p.csproj".into(),

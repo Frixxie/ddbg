@@ -17,24 +17,24 @@ async fn selected_string_theory_rows_hit_entry_and_run_exactly_once() {
     let rows = dbg.tests(Some("StringRow")).await.unwrap();
     assert_eq!(rows.len(), 5);
     for row in rows {
-        dbg.test_debug(&row.name, true)
+        dbg.test_debug(row.name(), true)
             .await
             .unwrap()
             .into_stopped()
             .unwrap();
         let input = dbg.print("input").await.unwrap().value;
         assert!(
-            row.name.contains(&format!("input: {input}")),
+            row.name().contains(&format!("input: {input}")),
             "{}: {input}",
-            row.name
+            row.name()
         );
         let start = dbg.stdout().len();
         dbg.cont().await.unwrap().into_exited().unwrap();
         let output = &dbg.stdout()[start..];
-        assert!(output.contains("total: 1"), "{}: {output}", row.name);
-        assert!(output.contains("succeeded: 1"), "{}: {output}", row.name);
+        assert!(output.contains("total: 1"), "{}: {output}", row.name());
+        assert!(output.contains("succeeded: 1"), "{}: {output}", row.name());
         let result = dbg.debug_test_result().unwrap();
-        assert_eq!(result.test, row.name);
+        assert_eq!(result.test, row.name());
         assert_eq!(result.outcome, Some(TestOutcome::Passed));
         assert_eq!(result.counts.unwrap().total, 1);
     }
@@ -91,9 +91,9 @@ async fn selected_theory_row_and_wait_after_kill() {
         Debugger::from_cli(["--adapter", "netcoredbg --interpreter=vscode"], fixture()).unwrap();
     let rows = dbg.tests(Some("AddsMany")).await.unwrap();
     assert_eq!(rows.len(), 2);
-    let row = rows.iter().find(|row| row.name.contains("a: 2")).unwrap();
+    let row = rows.iter().find(|row| row.name().contains("a: 2")).unwrap();
 
-    dbg.test_debug(&row.name, true)
+    dbg.test_debug(row.name(), true)
         .await
         .unwrap()
         .into_stopped()
@@ -106,7 +106,7 @@ async fn selected_theory_row_and_wait_after_kill() {
     assert!(matches!(dbg.wait().await.unwrap(), Halt::Exited(_)));
 
     dbg.set_timeout(Duration::from_secs(30));
-    dbg.test_debug(&row.name, true)
+    dbg.test_debug(row.name(), true)
         .await
         .unwrap()
         .into_stopped()
@@ -116,7 +116,7 @@ async fn selected_theory_row_and_wait_after_kill() {
     dbg.set_timeout(Duration::ZERO);
     assert_eq!(dbg.wait().await.unwrap(), Halt::Terminated);
     dbg.set_timeout(Duration::from_secs(30));
-    dbg.test_debug(&row.name, true)
+    dbg.test_debug(row.name(), true)
         .await
         .unwrap()
         .into_stopped()

@@ -110,7 +110,7 @@ async fn debug_failing_test(mut dbg: Debugger, name: &str, file: PathBuf, marker
     let line = line_of(&file, marker);
     dbg.break_at(&file, line).await.unwrap();
     let stop = dbg
-        .test_debug(&tests[0].name, false)
+        .test_debug(tests[0].name(), false)
         .await
         .unwrap()
         .into_stopped()

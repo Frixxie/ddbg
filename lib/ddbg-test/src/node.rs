@@ -156,7 +156,7 @@ impl NodeTestProvider {
             NodeRunner::Vitest => parse_vitest_run(&self.root, &json),
             NodeRunner::Playwright => parse_playwright(&self.root, &json)
                 .into_iter()
-                .filter_map(|t| Some((t.case.name, t.result?)))
+                .filter_map(|t| Some((t.case.id.name, t.result?)))
                 .collect(),
         })
     }
@@ -175,7 +175,7 @@ impl TestProvider for NodeTestProvider {
         for runner in &self.runners {
             tests.extend(self.list(*runner).await?);
         }
-        tests.retain(|t| query.matches(&t.name));
+        tests.retain(|t| query.matches(t.name()));
         Ok(tests)
     }
 
@@ -291,8 +291,7 @@ fn test_case(
     });
     TestCase {
         id: TestId {
-            provider: ProviderId::Node,
-            name: name.clone(),
+            name,
             data: ProviderData::Node {
                 runner,
                 root: root.to_owned(),
@@ -300,7 +299,6 @@ fn test_case(
                 line,
             },
         },
-        name,
         display_name,
         source: Some(file.to_owned()),
         line: body.or(line),
@@ -571,7 +569,7 @@ mod tests {
             {"name": "points > adds", "file": "/p/tests/a.test.ts", "location": {"line": 9, "column": 3}},
         ]);
         let cases = parse_vitest_list(root, &json);
-        assert_eq!(cases[1].name, "tests/a.test.ts > points > adds");
+        assert_eq!(cases[1].name(), "tests/a.test.ts > points > adds");
         assert_eq!(cases[1].display_name, "adds");
         assert_eq!(cases[1].suite.as_deref(), Some("tests/a.test.ts > points"));
         assert_eq!(cases[1].line, Some(9));
@@ -615,9 +613,9 @@ mod tests {
                     {"status": "unexpected", "results": [{"status": "failed", "error": {"message": "boom"}}]}]}]}]
         }]});
         let tests = parse_playwright(Path::new("/p"), &json);
-        assert_eq!(tests[0].case.name, "e2e/a.spec.ts > top");
+        assert_eq!(tests[0].case.name(), "e2e/a.spec.ts > top");
         assert_eq!(tests[0].result, Some((TestOutcome::Passed, String::new())));
-        assert_eq!(tests[1].case.name, "e2e/a.spec.ts > suite > fails");
+        assert_eq!(tests[1].case.name(), "e2e/a.spec.ts > suite > fails");
         assert_eq!(location(&tests[1].case.id).unwrap(), "e2e/a.spec.ts:9");
         assert_eq!(tests[1].result, Some((TestOutcome::Failed, "boom".into())));
 

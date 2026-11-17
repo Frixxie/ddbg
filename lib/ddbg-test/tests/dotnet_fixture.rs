@@ -26,7 +26,7 @@ async fn discover_run_and_debug_target() {
     let p = DotNetTestProvider::new(fixture());
 
     let all = p.discover(&TestQuery::default()).await.unwrap();
-    let names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<_> = all.iter().map(|t| t.name()).collect();
     assert!(
         names.contains(&"HelloTests.CalculatorTests.Adds"),
         "{names:?}"
@@ -52,7 +52,7 @@ async fn discover_run_and_debug_target() {
 
     for row in all
         .iter()
-        .filter(|t| t.name.contains("AddsMany(") || t.name.contains("StringRow("))
+        .filter(|t| t.name().contains("AddsMany(") || t.name().contains("StringRow("))
     {
         let run = p.run(std::slice::from_ref(&row.id)).await.unwrap();
         assert_eq!(run.results[0].outcome, TestOutcome::Passed);
@@ -65,10 +65,7 @@ async fn discover_run_and_debug_target() {
         let DebugTarget::Launch(target) = p.debug_target(&row.id).await.unwrap() else {
             panic!("expected launch");
         };
-        assert_eq!(
-            target.args[..2],
-            ["--filter-display-name", row.name.as_str()]
-        );
+        assert_eq!(target.args[..2], ["--filter-display-name", row.name()]);
         // Execute exactly the launch arguments the debugger receives. Checking
         // only ddbg's rendered result count would miss method-wide execution.
         let output = tokio::process::Command::new("dotnet")

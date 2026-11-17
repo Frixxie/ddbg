@@ -75,10 +75,10 @@ impl DebugTestRun {
     fn result(&self) -> DebugTestResult {
         // js-debug reports no exit, only termination; the runner summary is
         // the evidence that the run completed.
-        let exited = self.exited || self.test.id.provider == ddbg_test::ProviderId::Node;
+        let exited = self.exited || self.test.id.provider() == ddbg_test::ProviderId::Node;
         let counts = if self.finished && exited {
             let output = plain_text(&self.stdout);
-            match self.test.id.provider {
+            match self.test.id.provider() {
                 ddbg_test::ProviderId::DotNet => ddbg_test::dotnet::parse_counts(&output),
                 ddbg_test::ProviderId::Rust => ddbg_test::rust::parse_counts(&output),
                 ddbg_test::ProviderId::Python => ddbg_test::python::parse_counts(&output),
@@ -93,7 +93,7 @@ impl DebugTestRun {
             ))),
             Some(c) if c.outcome() == TestOutcome::Failed => (
                 Some(TestOutcome::Failed),
-                match self.test.id.provider {
+                match self.test.id.provider() {
                     ddbg_test::ProviderId::Node => {
                         ddbg_test::node::parse_failure(&plain_text(&format!(
                             "{}{}",
@@ -113,7 +113,7 @@ impl DebugTestRun {
             None => (None, None),
         };
         DebugTestResult {
-            test: self.test.name.clone(),
+            test: self.test.name().to_owned(),
             outcome,
             counts,
             diagnostic,

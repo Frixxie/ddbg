@@ -67,7 +67,7 @@ async fn debug_failing_test(mut dbg: Debugger) {
     let tests = dbg.tests(Some("test_fails")).await.unwrap();
     assert_eq!(tests.len(), 1);
     let stop = dbg
-        .test_debug(&tests[0].name, true)
+        .test_debug(tests[0].name(), true)
         .await
         .unwrap()
         .into_stopped()

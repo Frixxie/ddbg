@@ -178,13 +178,11 @@ fn test_case(root: &Path, name: String) -> TestCase {
     let suite = name.rsplit_once("::").map(|(s, _)| s.to_owned());
     TestCase {
         id: TestId {
-            provider: ProviderId::Python,
-            name: name.clone(),
+            name,
             data: ProviderData::Python {
                 root: root.to_owned(),
             },
         },
-        name,
         display_name,
         source: Some(source),
         line,

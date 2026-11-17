@@ -143,7 +143,7 @@ impl TestProvider for DotNetTestProvider {
                 let sources = sources.get_or_insert_with(|| {
                     asm.project.parent().map(read_sources).unwrap_or_default()
                 });
-                if let Some((file, line)) = locate_method(sources, method_name(&case.name)) {
+                if let Some((file, line)) = locate_method(sources, method_name(case.name())) {
                     case.source = Some(file);
                     case.line = Some(line);
                 }
@@ -281,15 +281,13 @@ fn test_case(asm: &TestAssembly, framework: &Framework, name: String) -> TestCas
     let display_name = format!("{short}{}", &name[method.len()..]);
     TestCase {
         id: TestId {
-            provider: ProviderId::DotNet,
-            name: name.clone(),
+            name,
             data: ProviderData::DotNet {
                 assembly: asm.assembly.clone(),
                 project: asm.project.clone(),
                 framework: framework.clone(),
             },
         },
-        name,
         display_name,
         source: None,
         line: None,
@@ -572,7 +570,7 @@ Test discovery summary: found 2 test(s) - /x/HelloTests.dll (net10.0|arm64)
         assert_eq!(c.display_name, "M(a: 1)");
         assert_eq!(c.suite.as_deref(), Some("Ns.C"));
         assert_eq!(
-            filter_args(&Framework::XUnitV3, &c.name).unwrap(),
+            filter_args(&Framework::XUnitV3, c.name()).unwrap(),
             ["--filter-display-name", "Ns.C.M(a: 1)"]
         );
     }

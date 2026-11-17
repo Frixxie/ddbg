@@ -30,7 +30,7 @@ async fn discover_run_and_debug_target() {
     let p = PythonTestProvider::new(fixture()).with_python(python());
 
     let all = p.discover(&TestQuery::default()).await.unwrap();
-    let names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<_> = all.iter().map(|t| t.name()).collect();
     assert_eq!(
         names,
         [

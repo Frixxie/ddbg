@@ -135,8 +135,8 @@ fn draw_picker(f: &mut Frame, app: &App, picker: &TestPicker) {
         picker,
         &title,
         |t| {
-            let mut spans = vec![Span::raw(t.name.clone())];
-            if t.display_name != t.name {
+            let mut spans = vec![Span::raw(t.name().to_owned())];
+            if t.display_name != t.name() {
                 spans.push(Span::styled(
                     format!("  {}", t.display_name),
                     Style::new().fg(Color::DarkGray),

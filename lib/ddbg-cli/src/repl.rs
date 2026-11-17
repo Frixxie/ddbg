@@ -241,7 +241,7 @@ impl Repl {
             .tests
             .listed()
             .iter()
-            .map(|t| t.name.clone())
+            .map(|t| t.name().to_owned())
             .collect();
         match outcome {
             Outcome::Quit => return true,

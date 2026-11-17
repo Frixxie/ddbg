@@ -177,7 +177,8 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let act = |p: &TestPicker, f: fn(TestSelector) -> Command| {
-            p.selected().map(|t| f(TestSelector::Name(t.name.clone())))
+            p.selected()
+                .map(|t| f(TestSelector::Name(t.name().to_owned())))
         };
         let cmd = match key.code {
             KeyCode::Esc => {

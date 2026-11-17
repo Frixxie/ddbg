@@ -217,8 +217,7 @@ fn test_case(bin: &TestBinary, name: String) -> TestCase {
     let suite = name.rsplit_once("::").map(|(s, _)| s.to_owned());
     TestCase {
         id: TestId {
-            provider: ProviderId::Rust,
-            name: name.clone(),
+            name,
             data: ProviderData::Rust {
                 binary: bin.executable.clone(),
                 package: bin.package.clone(),
@@ -226,7 +225,6 @@ fn test_case(bin: &TestBinary, name: String) -> TestCase {
                 package_dir: bin.package_dir.clone(),
             },
         },
-        name,
         display_name,
         source: None,
         line: None,

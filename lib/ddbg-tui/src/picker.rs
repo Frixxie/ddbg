@@ -12,7 +12,7 @@ pub trait PickerItem {
 
 impl PickerItem for TestCase {
     fn label(&self) -> &str {
-        &self.name
+        self.name()
     }
 }
 
@@ -122,7 +122,7 @@ impl<T: PickerItem> Picker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ddbg_test::{ProviderData, ProviderId, TestId};
+    use ddbg_test::{ProviderData, TestId};
     use quickcheck_macros::quickcheck;
 
     #[quickcheck]
@@ -140,7 +140,7 @@ mod tests {
         picker
             .matches()
             .iter()
-            .map(|item| &item.name)
+            .map(|item| item.name())
             .collect::<Vec<_>>()
             == expected
     }
@@ -156,14 +156,14 @@ mod tests {
         let before: Vec<_> = picker
             .matches()
             .iter()
-            .map(|item| item.name.clone())
+            .map(|item| item.name().to_owned())
             .collect();
         picker.filter.push(' ');
         picker.filter.push_str(&extra);
         picker
             .matches()
             .iter()
-            .all(|item| before.contains(&item.name))
+            .all(|item| before.iter().any(|n| n == item.name()))
     }
 
     #[quickcheck]
@@ -192,7 +192,10 @@ mod tests {
                 assert!(picker.selected().is_none());
             } else {
                 assert!(picker.cursor < matches.len());
-                assert_eq!(picker.selected().unwrap().name, matches[picker.cursor].name);
+                assert_eq!(
+                    picker.selected().unwrap().name(),
+                    matches[picker.cursor].name()
+                );
             }
         }
         true
@@ -211,7 +214,6 @@ mod tests {
     fn case(name: &str) -> TestCase {
         TestCase {
             id: TestId {
-                provider: ProviderId::Rust,
                 name: name.into(),
                 data: ProviderData::Rust {
                     binary: "/b".into(),
@@ -220,7 +222,6 @@ mod tests {
                     package_dir: "/p".into(),
                 },
             },
-            name: name.into(),
             display_name: name.into(),
             source: None,
             line: None,
@@ -243,7 +244,7 @@ mod tests {
         "Empty".chars().for_each(|c| p.push(c));
         assert_eq!(p.matches().len(), 2);
         " lex".chars().for_each(|c| p.push(c));
-        assert_eq!(p.selected().unwrap().name, "lexer::tests::empty");
+        assert_eq!(p.selected().unwrap().name(), "lexer::tests::empty");
     }
 
     #[test]
@@ -253,7 +254,7 @@ mod tests {
         assert_eq!(p.cursor, 2);
         "nested".chars().for_each(|c| p.push(c));
         assert_eq!(p.cursor, 0);
-        assert_eq!(p.selected().unwrap().name, "parser::tests::nested");
+        assert_eq!(p.selected().unwrap().name(), "parser::tests::nested");
         "zzz".chars().for_each(|c| p.push(c));
         assert!(p.selected().is_none());
         p.move_cursor(-1);
