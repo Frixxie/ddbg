@@ -5,6 +5,7 @@
 //! halts (or a timeout passes) and report the resulting state. While such a
 //! command waits, `pause`, `kill` and `end_session` still act immediately.
 
+mod backtrace;
 mod dto;
 
 use std::path::PathBuf;
@@ -741,17 +742,11 @@ impl DdbgServer {
             Ok(r) => r,
             Err(e) => return fail(e),
         };
-        let Reply::Backtrace { frames, selected } = reply else {
-            return ok(None, unexpected(reply));
-        };
         if p.all {
-            let summary = st.dbg.renderer_mut().reply(
-                &cmd,
-                &Reply::Backtrace {
-                    frames: frames.clone(),
-                    selected,
-                },
-            );
+            let summary = st.dbg.renderer_mut().reply(&cmd, &reply);
+            let Reply::Backtrace { frames, selected } = reply else {
+                return ok(None, unexpected(reply));
+            };
             let frames: Vec<_> = frames
                 .into_iter()
                 .enumerate()
@@ -762,43 +757,13 @@ impl DdbgServer {
                 serde_json::json!({ "selected": selected, "frames": frames }),
             );
         }
-        let total = frames.len();
-        let mut summary = String::new();
-        let mut shown = Vec::new();
-        let mut hidden_run = 0;
-        for (i, f) in frames.into_iter().enumerate() {
-            if !f.path.as_deref().is_some_and(std::path::Path::exists) && Some(i) != selected {
-                hidden_run += 1;
-                continue;
-            }
-            if hidden_run > 0 {
-                summary.push_str(&format!(
-                    "   ... {hidden_run} frames without local source\n"
-                ));
-                hidden_run = 0;
-            }
-            let marker = if Some(i) == selected { '*' } else { ' ' };
-            let location = match &f.path {
-                Some(path) => format!(" at {}:{}", path.display(), f.line),
-                None => String::new(),
-            };
-            summary.push_str(&format!("{marker}#{i} {}{location}\n", f.name));
-            shown.push(FrameDto::new(Some(i), f));
-        }
-        if hidden_run > 0 {
-            summary.push_str(&format!(
-                "   ... {hidden_run} frames without local source\n"
-            ));
-        }
-        let hidden = total - shown.len();
-        if hidden > 0 {
-            summary.push_str(&format!(
-                "{hidden} of {total} frames without local source hidden; pass `all: true` to show them."
-            ));
-        }
+        let Reply::Backtrace { frames, selected } = reply else {
+            return ok(None, unexpected(reply));
+        };
+        let bt = backtrace::local_backtrace(frames, selected, std::path::Path::exists);
         ok(
-            Some(summary),
-            serde_json::json!({ "selected": selected, "frames": shown, "hidden": hidden }),
+            Some(bt.summary),
+            serde_json::json!({ "selected": selected, "frames": bt.shown, "hidden": bt.hidden }),
         )
     }
 
