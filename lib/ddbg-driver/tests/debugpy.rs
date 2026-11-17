@@ -6,7 +6,7 @@ mod common;
 use common::line_of;
 use std::path::PathBuf;
 
-use ddbg_driver::{Debugger, TestOutcome};
+use ddbg_driver::{Debugger, StopReason, TestOutcome};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/hello-python")
@@ -74,6 +74,13 @@ async fn debug_failing_test(mut dbg: Debugger) {
         .unwrap();
     assert_eq!(
         stop.frame.unwrap().line,
+        line_of(fixture().join("tests/test_main.py"), "failing-assert")
+    );
+    // The assertion escapes user code, so the debugger pauses on it.
+    let failure = dbg.cont().await.unwrap().into_stopped().unwrap();
+    assert!(matches!(failure.reason, StopReason::Exception(_)));
+    assert_eq!(
+        failure.frame.unwrap().line,
         line_of(fixture().join("tests/test_main.py"), "failing-assert")
     );
     dbg.cont().await.unwrap().into_exited().unwrap();

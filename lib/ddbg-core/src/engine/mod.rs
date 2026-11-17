@@ -13,8 +13,8 @@ use ddbg_dap::protocol::{
     self as dap, AttachArguments, CompletionsArguments, ConfigurationDoneArguments,
     ContinueArguments, DapEvent, DisconnectArguments, EvaluateArguments, ExceptionInfoArguments,
     InitializeArguments, LaunchArguments, NextArguments, PauseArguments, ScopesArguments,
-    SetExpressionArguments, SetVariableArguments, StackTraceArguments, StepInArguments,
-    StepOutArguments, ThreadsArguments, VariablesArguments,
+    SetExceptionBreakpointsArguments, SetExpressionArguments, SetVariableArguments,
+    StackTraceArguments, StepInArguments, StepOutArguments, ThreadsArguments, VariablesArguments,
 };
 use ddbg_dap::{DapClient, Incoming};
 use tokio::process::Child;

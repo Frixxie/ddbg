@@ -203,8 +203,20 @@ pub struct Capabilities {
     pub supports_log_points: bool,
     #[serde(default)]
     pub supports_single_thread_execution_requests: bool,
+    #[serde(default)]
+    pub exception_breakpoint_filters: Vec<ExceptionBreakpointsFilter>,
     #[serde(flatten)]
     pub other: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionBreakpointsFilter {
+    pub filter: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub default: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +315,17 @@ request!(
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigurationDoneArguments {}
 request!(ConfigurationDoneArguments, "configurationDone", Empty);
+
+/// Replaces the session's enabled exception filters.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetExceptionBreakpointsArguments {
+    pub filters: Vec<String>,
+}
+request!(
+    SetExceptionBreakpointsArguments,
+    "setExceptionBreakpoints",
+    Empty
+);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -662,7 +685,7 @@ mod tests {
         }))
         .unwrap();
         assert!(c.supports_configuration_done_request);
-        assert!(c.other.contains_key("exceptionBreakpointFilters"));
+        assert!(c.exception_breakpoint_filters.is_empty());
     }
 
     #[test]

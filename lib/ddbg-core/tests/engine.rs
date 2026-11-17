@@ -1094,6 +1094,29 @@ async fn lifecycle_order_and_breakpoint_hit() {
 }
 
 #[tokio::test]
+async fn unhandled_exception_filters_are_enabled_at_startup() {
+    let (_e, log, _rx, args) = start_stopped_with(json!({"exceptionBreakpointFilters": [
+        {"filter": "all", "label": "all"},
+        {"filter": "user-unhandled", "label": "user-unhandled"},
+        {"filter": "raised", "label": "Raised", "default": true},
+        {"filter": "uncaught", "label": "Uncaught"},
+    ]}))
+    .await;
+    assert_eq!(requests(&log, "setExceptionBreakpoints"), 1);
+    assert_eq!(
+        last_args(&args, "setExceptionBreakpoints")["filters"],
+        json!(["user-unhandled", "raised", "uncaught"])
+    );
+}
+
+#[tokio::test]
+async fn exception_breakpoints_are_not_sent_without_filters() {
+    let (e, log, _rx) = start_stopped_at_breakpoint().await;
+    drop(e);
+    assert_eq!(requests(&log, "setExceptionBreakpoints"), 0);
+}
+
+#[tokio::test]
 async fn inspect_step_continue_to_exit() {
     let (e, log, mut rx) = start_stopped_at_breakpoint().await;
 

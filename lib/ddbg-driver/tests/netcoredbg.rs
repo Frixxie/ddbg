@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ddbg_driver::{Debugger, Halt, TestOutcome};
+use ddbg_driver::{Debugger, Halt, StopReason, TestOutcome};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/hello-dotnet")
@@ -53,6 +53,13 @@ async fn runner_failure_is_separate_from_adapter_exit_and_resets_on_launch() {
         .into_stopped()
         .unwrap();
     assert_eq!(dbg.debug_test_result().unwrap().outcome, None);
+    // The assertion is not handled in user code, so the debugger pauses on it.
+    let failure = dbg.cont().await.unwrap().into_stopped().unwrap();
+    assert!(matches!(failure.reason, StopReason::Exception(_)));
+    assert_eq!(
+        failure.exception.unwrap().type_name.as_deref(),
+        Some("Xunit.Sdk.EqualException")
+    );
     dbg.cont().await.unwrap().into_exited().unwrap();
     let result = dbg.debug_test_result().unwrap();
     assert_eq!(result.outcome, Some(TestOutcome::Failed));
@@ -79,6 +86,7 @@ async fn runner_failure_is_separate_from_adapter_exit_and_resets_on_launch() {
     .into_stopped()
     .unwrap();
     assert_eq!(dbg.debug_test_result(), None);
+    dbg.cont().await.unwrap().into_stopped().unwrap();
     dbg.cont().await.unwrap().into_exited().unwrap();
     assert_eq!(dbg.debug_test_result(), None);
     dbg.quit().await.unwrap();

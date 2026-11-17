@@ -145,6 +145,12 @@ impl Engine {
         if self.session.breakpoints.has_functions() {
             self.sync_function_breakpoints().await?;
         }
+        let filters = unhandled_exception_filters(&self.session.capabilities);
+        if !filters.is_empty() {
+            client
+                .request(SetExceptionBreakpointsArguments { filters })
+                .await?;
+        }
         self.resumed_at = Some(Instant::now());
         if self.session.supports(Feature::ConfigurationDone) {
             client.request(ConfigurationDoneArguments {}).await?;
@@ -340,4 +346,16 @@ fn with_color_env(target: &LaunchTarget) -> LaunchTarget {
         }
     }
     t
+}
+
+/// Stop where an exception escapes user code, as an IDE would: the adapter's
+/// defaults, plus the conventional "uncaught"/"user-unhandled" filters, which
+/// also catch failures swallowed by a test framework (e.g. xUnit assertions).
+fn unhandled_exception_filters(caps: &dap::Capabilities) -> Vec<String> {
+    const UNHANDLED: [&str; 3] = ["uncaught", "user-unhandled", "userUnhandled"];
+    caps.exception_breakpoint_filters
+        .iter()
+        .filter(|f| f.default || UNHANDLED.contains(&f.filter.as_str()))
+        .map(|f| f.filter.clone())
+        .collect()
 }

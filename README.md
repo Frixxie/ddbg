@@ -235,6 +235,12 @@ For function breakpoints, prefer qualified names (e.g. `hello_rust::add`)
 when a short name could also match other functions. Invalid expressions and
 condition evaluation errors are reported according to the adapter's behavior.
 
+Execution also pauses when an exception escapes user code: ddbg enables the
+adapter's default exception filters plus its `uncaught`/user-unhandled filters
+(e.g. netcoredbg `user-unhandled`, debugpy `userUnhandled`). A failing test
+assertion caught by xUnit or pytest therefore stops at the failure; `continue`
+lets the test finish and report its outcome.
+
 ### Attaching to a process
 
 ```console
